@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE `orgsettings` MODIFY `primaryColor` VARCHAR(191) NOT NULL DEFAULT '#0B2447',
+    MODIFY `accentColor` VARCHAR(191) NOT NULL DEFAULT '#C1922B';

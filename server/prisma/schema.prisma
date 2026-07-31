@@ -1,0 +1,352 @@
+// CAG Work Management System - Prisma schema (MySQL)
+// This models the FULL application. Routes fill in feature by feature on top.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- enums ----------
+// Roles, permissions and hierarchy are DATA, not code. An admin can rename,
+// add, or remove roles and remap permissions without touching the app.
+model Role {
+  id          String   @id @default(uuid()) @db.Char(36)
+  name        String   @unique
+  description String?
+  level       Int      @default(0) // hierarchy: higher = more senior
+  isSystem    Boolean  @default(false) // built-in role, protected from deletion
+  isDefault   Boolean  @default(false) // auto-assigned to new sign-ups
+  createdAt   DateTime @default(now())
+
+  users       User[]
+  permissions RolePermission[]
+}
+
+model Permission {
+  id          String           @id @default(uuid()) @db.Char(36)
+  key         String           @unique // e.g. "task.view_all"
+  description String?
+  roles       RolePermission[]
+}
+
+model RolePermission {
+  roleId       String     @db.Char(36)
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permissionId String     @db.Char(36)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([permissionId])
+}
+
+enum TaskStatus {
+  YET_TO_BE_ASSIGNED
+  INITIATED
+  IN_PROGRESS
+  FINISHED
+  ON_HOLD
+}
+
+enum TaskPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum RequestState {
+  PENDING_APPROVAL   // cross-department: waiting for the target dept head
+  PENDING_ACCEPTANCE // waiting for the assignee to accept
+  ACCEPTED           // assignee accepted; they now own it
+  DECLINED           // assignee declined; sent back to assigner
+  REJECTED           // department head rejected the incoming work
+  CANCELLED          // assigner cancelled
+}
+
+enum MeetingMode {
+  PHYSICAL
+  ONLINE
+}
+
+// Singleton row (id = "org") holding the tenant's branding. Everything
+// organization-specific lives here as data, so the app can be rebranded for a
+// different organization without code changes.
+model OrgSettings {
+  id           String   @id @default("org")
+  name         String   @default("CAG Work Management")
+  logoPath     String?
+  primaryColor String   @default("#0B2447")
+  accentColor  String   @default("#C1922B")
+  updatedAt    DateTime @updatedAt
+}
+
+// ---------- offices ----------
+model Office {
+  id        String   @id @default(uuid()) @db.Char(36)
+  name      String
+  code      String?  @unique
+  city      String?
+  createdAt DateTime @default(now())
+
+  users       User[]
+  teams       Team[]
+  tasks       Task[]
+  departments Department[]
+}
+
+// A department/wing within an office. Can nest (parent) and has a head user.
+// This is the org structure the approval engine will route work through.
+model Department {
+  id          String   @id @default(uuid()) @db.Char(36)
+  name        String
+  code        String?
+  description String?
+  officeId    String?  @db.Char(36)
+  office      Office?  @relation(fields: [officeId], references: [id])
+  parentId    String?  @db.Char(36)
+  parent      Department?  @relation("DeptTree", fields: [parentId], references: [id])
+  children    Department[] @relation("DeptTree")
+  headId      String?  @db.Char(36)
+  head        User?    @relation("DeptHead", fields: [headId], references: [id])
+  members     User[]   @relation("DeptMembers")
+  tasks       Task[]   @relation("TaskDept")
+  incomingRequests TaskRequest[] @relation("ReqDept")
+  createdAt   DateTime @default(now())
+
+  @@index([officeId])
+  @@index([parentId])
+}
+
+// ---------- users (auth + profile in one table) ----------
+model User {
+  id           String   @id @default(uuid()) @db.Char(36)
+  cagId        String?  @unique
+  fullName     String
+  email        String   @unique
+  passwordHash String
+  designation  String? // free text: the user's official title, typed at sign-up
+  wing         String?
+  roleId       String?  @db.Char(36)
+  role         Role?    @relation(fields: [roleId], references: [id])
+  avatarUrl    String?
+  officeId     String?  @db.Char(36)
+  office       Office?  @relation(fields: [officeId], references: [id])
+  departmentId String?  @db.Char(36)
+  department   Department? @relation("DeptMembers", fields: [departmentId], references: [id])
+  headedDepartments Department[] @relation("DeptHead")
+  managerId    String?  @db.Char(36)
+  manager      User?    @relation("UserManager", fields: [managerId], references: [id])
+  reports      User[]   @relation("UserManager")
+  createdAt    DateTime @default(now())
+
+  teamsOwned      Team[]                @relation("TeamOwner")
+  memberships     TeamMember[]
+  tasksCreated    Task[]                @relation("TaskCreator")
+  tasksPrimary    Task[]                @relation("TaskPrimary")
+  tasksSecondary  Task[]                @relation("TaskSecondary")
+  tasksHolding    Task[]                @relation("TaskHolder")
+  requestsFrom    TaskRequest[]         @relation("ReqFrom")
+  requestsTo      TaskRequest[]         @relation("ReqTo")
+  requestsApproved TaskRequest[]        @relation("ReqApprover")
+  comments        TaskComment[]
+  attachments     Attachment[]
+  meetingsCreated Meeting[]             @relation("MeetingCreator")
+  meetingParts    MeetingParticipant[]
+  notifications   Notification[]
+  activities      ActivityLog[]
+
+  @@index([officeId])
+  @@index([roleId])
+  @@index([departmentId])
+  @@index([managerId])
+}
+
+// ---------- teams ----------
+model Team {
+  id           String   @id @default(uuid()) @db.Char(36)
+  name         String
+  description  String?  @db.Text
+  officeId     String?  @db.Char(36)
+  office       Office?  @relation(fields: [officeId], references: [id])
+  ownerId      String?  @db.Char(36)
+  owner        User?    @relation("TeamOwner", fields: [ownerId], references: [id])
+  mergedIntoId String?  @db.Char(36)
+  mergedInto   Team?    @relation("TeamMerge", fields: [mergedIntoId], references: [id])
+  mergedFrom   Team[]   @relation("TeamMerge")
+  createdAt    DateTime @default(now())
+
+  members  TeamMember[]
+  tasks    Task[]
+  meetings Meeting[]
+
+  @@index([officeId])
+  @@index([ownerId])
+}
+
+model TeamMember {
+  teamId     String   @db.Char(36)
+  team       Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  userId     String   @db.Char(36)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roleInTeam String   @default("member")
+  joinedAt   DateTime @default(now())
+
+  @@id([teamId, userId])
+  @@index([userId])
+}
+
+// ---------- tasks ----------
+model Task {
+  id              String       @id @default(uuid()) @db.Char(36)
+  title           String
+  description     String?      @db.Text
+  status          TaskStatus   @default(INITIATED)
+  priority        TaskPriority @default(NORMAL)
+  officeId        String?      @db.Char(36)
+  office          Office?      @relation(fields: [officeId], references: [id])
+  teamId          String?      @db.Char(36)
+  team            Team?        @relation(fields: [teamId], references: [id])
+  primaryLeadId   String?      @db.Char(36)
+  primaryLead     User?        @relation("TaskPrimary", fields: [primaryLeadId], references: [id])
+  secondaryLeadId String?      @db.Char(36)
+  secondaryLead   User?        @relation("TaskSecondary", fields: [secondaryLeadId], references: [id])
+  currentlyWithId String?      @db.Char(36)
+  currentlyWith   User?        @relation("TaskHolder", fields: [currentlyWithId], references: [id])
+  departmentId    String?      @db.Char(36)
+  department      Department?  @relation("TaskDept", fields: [departmentId], references: [id])
+  createdById     String?      @db.Char(36)
+  createdBy       User?        @relation("TaskCreator", fields: [createdById], references: [id])
+  assignedDate    DateTime?
+  dueDate         DateTime?
+  pctComplete     Int?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  requests    TaskRequest[]
+  comments    TaskComment[]
+  attachments Attachment[]
+  meetings    Meeting[]
+  activities  ActivityLog[]
+
+  @@index([primaryLeadId])
+  @@index([teamId])
+  @@index([dueDate])
+  @@index([status])
+  @@index([departmentId])
+}
+
+// ---------- assign / request work ----------
+model TaskRequest {
+  id               String       @id @default(uuid()) @db.Char(36)
+  taskId           String       @db.Char(36)
+  task             Task         @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  fromId           String?      @db.Char(36)
+  from             User?        @relation("ReqFrom", fields: [fromId], references: [id])
+  toId             String?      @db.Char(36)
+  to               User?        @relation("ReqTo", fields: [toId], references: [id])
+  toDepartmentId   String?      @db.Char(36)
+  toDepartment     Department?  @relation("ReqDept", fields: [toDepartmentId], references: [id])
+  message          String?      @db.Text
+  state            RequestState @default(PENDING_ACCEPTANCE)
+  requiresApproval Boolean      @default(false)
+  approvedById     String?      @db.Char(36)
+  approvedBy       User?        @relation("ReqApprover", fields: [approvedById], references: [id])
+  resolvedAt       DateTime?
+  createdAt        DateTime     @default(now())
+
+  @@index([taskId])
+  @@index([toId])
+  @@index([toDepartmentId])
+  @@index([state])
+}
+
+// ---------- remarks / comments ----------
+model TaskComment {
+  id         String   @id @default(uuid()) @db.Char(36)
+  taskId     String   @db.Char(36)
+  task       Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  authorId   String?  @db.Char(36)
+  author     User?    @relation(fields: [authorId], references: [id])
+  authorRole String?
+  body       String   @db.Text
+  createdAt  DateTime @default(now())
+
+  @@index([taskId])
+}
+
+// ---------- attachments (files on server disk / cloud) ----------
+model Attachment {
+  id           String   @id @default(uuid()) @db.Char(36)
+  taskId       String   @db.Char(36)
+  task         Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  storagePath  String
+  fileName     String
+  uploadedById String?  @db.Char(36)
+  uploadedBy   User?    @relation(fields: [uploadedById], references: [id])
+  createdAt    DateTime @default(now())
+
+  @@index([taskId])
+}
+
+// ---------- meetings ----------
+model Meeting {
+  id          String      @id @default(uuid()) @db.Char(36)
+  title       String
+  agenda      String?     @db.Text
+  teamId      String?     @db.Char(36)
+  team        Team?       @relation(fields: [teamId], references: [id])
+  taskId      String?     @db.Char(36)
+  task        Task?       @relation(fields: [taskId], references: [id])
+  startsAt    DateTime
+  mode        MeetingMode @default(PHYSICAL)
+  location    String?
+  createdById String?     @db.Char(36)
+  createdBy   User?       @relation("MeetingCreator", fields: [createdById], references: [id])
+  createdAt   DateTime    @default(now())
+
+  participants MeetingParticipant[]
+
+  @@index([teamId])
+  @@index([startsAt])
+}
+
+model MeetingParticipant {
+  meetingId String  @db.Char(36)
+  meeting   Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  userId    String  @db.Char(36)
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([meetingId, userId])
+  @@index([userId])
+}
+
+// ---------- notifications (email digest reads from here) ----------
+model Notification {
+  id        String   @id @default(uuid()) @db.Char(36)
+  userId    String   @db.Char(36)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind      String
+  payload   Json?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead])
+}
+
+// ---------- activity log (audit trail) ----------
+model ActivityLog {
+  id        String   @id @default(uuid()) @db.Char(36)
+  taskId    String?  @db.Char(36)
+  task      Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  actorId   String?  @db.Char(36)
+  actor     User?    @relation(fields: [actorId], references: [id])
+  action    String
+  detail    Json?
+  createdAt DateTime @default(now())
+
+  @@index([taskId])
+}
