@@ -3,10 +3,17 @@ export interface AuthUser {
   fullName: string;
   email: string;
   officeId: string | null;
+  officeName: string | null;
   departmentId: string | null;
   roleId: string | null;
   roleName: string | null;
   level: number;
+  isActive: boolean;
+  mustChangePassword: boolean;
+  /** Offices this user is the head of (DG / PAG / DAG etc.). */
+  headsOfficeIds: string[];
+  /** Departments this user is the head of. */
+  headsDepartmentIds: string[];
   permissions: string[];
 }
 

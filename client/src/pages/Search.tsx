@@ -31,7 +31,7 @@ export default function Search() {
   }
 
   const empty =
-    results && !results.tasks.length && !results.people.length && !results.teams.length && !results.meetings.length;
+    results && !results.tasks.length && !results.people.length && !results.projects.length && !results.meetings.length;
 
   return (
     <div className="space-y-4 max-w-3xl">
@@ -42,7 +42,7 @@ export default function Search() {
           <input
             value={term}
             onChange={(e) => setTerm(e.target.value)}
-            placeholder="Search work items, people, teams, meetings..."
+            placeholder="Search work items, people, projects, meetings..."
             className="w-full border border-slate-200 rounded-md pl-9 pr-3 py-2 text-sm outline-none focus:border-indigo-400"
           />
         </div>
@@ -80,10 +80,10 @@ export default function Search() {
         </Card>
       )}
 
-      {results && results.teams.length > 0 && (
-        <Card title="Teams">
+      {results && results.projects.length > 0 && (
+        <Card title="Projects">
           <div className="flex flex-wrap gap-2">
-            {results.teams.map((t) => (
+            {results.projects.map((t) => (
               <span key={t.id} className="text-sm px-2.5 py-1 rounded-full border border-slate-200 bg-slate-50 text-slate-600">{t.name}</span>
             ))}
           </div>

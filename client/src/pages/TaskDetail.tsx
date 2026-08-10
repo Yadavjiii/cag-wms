@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
-import { useParams, Link } from "react-router-dom";
-import { ArrowLeft } from "lucide-react";
+import { useParams, Link, useNavigate } from "react-router-dom";
+import { ArrowLeft, Trash2 } from "lucide-react";
 import { Task, TaskStatus, Person, Assignment, RequestState, Attachment, ActivityEntry } from "../types";
 import { Card, Button, ErrorText } from "../components/ui";
 import { useAuth } from "../auth/AuthContext";
 import { api, uploadFile, downloadFile } from "../api/client";
 import { rag, ragText, statusLabel, fmtDate, describeAction, fmtDateTime } from "../lib/format";
 import { useRealtime } from "../realtime";
+import ProjectPanel from "../components/ProjectPanel";
 
 const STATUSES: TaskStatus[] = ["YET_TO_BE_ASSIGNED", "INITIATED", "IN_PROGRESS", "FINISHED", "ON_HOLD"];
 const stateLabel: Record<RequestState, string> = {
@@ -48,6 +49,19 @@ export default function TaskDetail() {
 
   // assignment workflow
   const { user } = useAuth();
+  const navigate = useNavigate();
+
+  /** Deleting archives the work item. It stays recoverable from the Tasks list. */
+  async function deleteTask() {
+    if (!task) return;
+    if (!confirm(`Delete "${task.title}"? It is archived rather than destroyed, and can be restored.`)) return;
+    try {
+      await api(`/tasks/${task.id}`, { method: "DELETE" });
+      navigate("/tasks");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Could not delete this work item");
+    }
+  }
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [assignTo, setAssignTo] = useState("");
   const [assignMsg, setAssignMsg] = useState("");
@@ -241,7 +255,19 @@ export default function TaskDetail() {
           <p className="text-sm text-slate-500 mt-0.5">{task.description || "No description"}</p>
         </div>
         <span className={`ml-auto text-sm font-semibold ${ragText[r.key]}`}>{r.label}</span>
+        <button
+          onClick={deleteTask}
+          title="Delete this work item"
+          className="flex items-center gap-1 text-xs px-2 py-1.5 rounded border border-slate-200 text-slate-500 hover:border-rose-300 hover:text-rose-600 hover:bg-rose-50"
+        >
+          <Trash2 className="w-3.5 h-3.5" /> Delete
+        </button>
       </div>
+      {task.archivedAt && (
+        <div className="text-sm text-rose-700 bg-rose-50 border border-rose-200 rounded-md px-3 py-2">
+          This work item was deleted. It is kept for the audit trail and can be restored from the Tasks list.
+        </div>
+      )}
 
       <ErrorText>{err}</ErrorText>
 
@@ -291,6 +317,8 @@ export default function TaskDetail() {
           <span className="text-xs text-slate-400">Assigned {fmtDate(task.assignedDate)} - created by {task.createdBy?.fullName ?? "-"}</span>
         </div>
       </Card>
+
+      <ProjectPanel task={task} onChanged={load} />
 
       <Card title="Assignment & movement">
         <div className="flex flex-wrap items-end gap-2">

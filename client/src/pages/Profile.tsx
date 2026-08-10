@@ -10,7 +10,7 @@ export default function Profile() {
   const [fullName, setFullName] = useState("");
   const [designation, setDesignation] = useState("");
   const [wing, setWing] = useState("");
-  const [cagId, setCagId] = useState("");
+  const [employeeId, setEmployeeId] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -20,9 +20,9 @@ export default function Profile() {
       .then((p) => {
         setMe(p);
         setFullName(p.fullName ?? "");
-        setDesignation(p.designation ?? "");
+        setDesignation(p.designation?.name ?? "");
         setWing(p.wing ?? "");
-        setCagId(p.cagId ?? "");
+        setEmployeeId(p.employeeId ?? "");
       })
       .catch((e) => setErr(e instanceof Error ? e.message : "Failed to load"));
   }, []);
@@ -39,7 +39,7 @@ export default function Profile() {
           fullName,
           designation: designation || undefined,
           wing: wing || undefined,
-          cagId: cagId || undefined,
+          employeeId: employeeId || undefined,
         }),
       });
       setMe(updated);
@@ -85,7 +85,7 @@ export default function Profile() {
           </div>
           <div>
             <label className="text-xs uppercase tracking-wide text-slate-400">CAG / staff ID</label>
-            <input value={cagId} onChange={(e) => setCagId(e.target.value)} className={`mt-1 ${input}`} />
+            <input value={employeeId} onChange={(e) => setEmployeeId(e.target.value)} className={`mt-1 ${input}`} />
           </div>
 
           <Button type="submit" disabled={busy}>{busy ? "Saving..." : "Save profile"}</Button>

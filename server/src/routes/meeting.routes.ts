@@ -3,7 +3,7 @@ import { z } from "zod";
 import { Prisma, MeetingMode } from "@prisma/client";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../utils/http";
-import { authenticate } from "../middleware/auth";
+import { authenticate, isGlobalAdmin } from "../middleware/auth";
 import { notify } from "../services/notify";
 import { buildICS } from "../utils/ics";
 
@@ -21,7 +21,7 @@ function meetingVisibility(user: ReqUser): Prisma.MeetingWhereInput {
 const detail = {
   createdBy: { select: { id: true, fullName: true } },
   task: { select: { id: true, title: true } },
-  team: { select: { id: true, name: true } },
+  project: { select: { id: true, name: true } },
   participants: { include: { user: { select: { id: true, fullName: true } } } },
 } as const;
 
@@ -52,7 +52,7 @@ const createSchema = z.object({
   mode: z.nativeEnum(MeetingMode).optional(),
   location: z.string().optional(),
   taskId: z.string().optional(),
-  teamId: z.string().optional(),
+  projectId: z.string().optional(),
   participantIds: z.array(z.string()).optional(),
 });
 
@@ -63,6 +63,28 @@ meetingRouter.post(
     const data = createSchema.parse(req.body);
     const ids = Array.from(new Set([...(data.participantIds ?? []), req.user!.id]));
 
+    // Office boundary: you may only convene people from your own office, and
+    // only against a project your office owns. Without this, any user could
+    // pull staff from another office into a meeting and read their names back
+    // out of the response.
+    if (!isGlobalAdmin(req.user!)) {
+      const officeId = req.user!.officeId ?? "__none__";
+
+      const outsiders = await prisma.user.count({
+        where: { id: { in: ids }, NOT: { officeId } },
+      });
+      if (outsiders > 0) throw new HttpError(403, "You can only invite people from your own office");
+
+      if (data.projectId) {
+        const project = await prisma.project.findUnique({
+          where: { id: data.projectId },
+          select: { officeId: true },
+        });
+        if (!project) throw new HttpError(404, "Project not found");
+        if (project.officeId !== officeId) throw new HttpError(403, "That project belongs to a different office");
+      }
+    }
+
     const meeting = await prisma.meeting.create({
       data: {
         title: data.title,
@@ -71,7 +93,7 @@ meetingRouter.post(
         mode: data.mode ?? MeetingMode.PHYSICAL,
         location: data.location,
         taskId: data.taskId,
-        teamId: data.teamId,
+        projectId: data.projectId,
         createdById: req.user!.id,
         participants: { create: ids.map((userId) => ({ userId })) },
       },

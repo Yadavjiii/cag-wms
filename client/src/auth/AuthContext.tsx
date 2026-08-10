@@ -16,6 +16,8 @@ interface AuthCtx {
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
   register: (data: RegisterData) => Promise<void>;
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
+  refresh: () => Promise<void>;
   logout: () => void;
 }
 
@@ -59,13 +61,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     reconnectRealtime();
   }
 
+  /** Swap a temporary password for a real one. Admin-created accounts land here first. */
+  async function changePassword(currentPassword: string, newPassword: string) {
+    const res = await api<{ user: User }>("/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ currentPassword, newPassword }),
+    });
+    setUser(res.user);
+  }
+
+  /** Re-read the current user, e.g. after a role or office change. */
+  async function refresh() {
+    if (!getToken()) return;
+    const res = await api<{ user: User }>("/auth/me");
+    setUser(res.user);
+  }
+
   function logout() {
     setToken(null);
     setUser(null);
     reconnectRealtime();
   }
 
-  return <Ctx.Provider value={{ user, loading, login, register, logout }}>{children}</Ctx.Provider>;
+  return (
+    <Ctx.Provider value={{ user, loading, login, register, changePassword, refresh, logout }}>{children}</Ctx.Provider>
+  );
 }
 
 export function useAuth(): AuthCtx {

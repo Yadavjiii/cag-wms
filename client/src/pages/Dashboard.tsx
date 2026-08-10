@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { AlertTriangle, Clock, CheckCircle2 } from "lucide-react";
+import { AlertTriangle, Clock, CheckCircle2, FolderKanban } from "lucide-react";
 import { api } from "../api/client";
-import { Task } from "../types";
+import { Task, Project } from "../types";
 import { Card } from "../components/ui";
 import { rag, ragText, ragBorder, statusLabel, fmtDate } from "../lib/format";
 import { useRealtime } from "../realtime";
 
 export default function Dashboard() {
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
@@ -17,6 +18,7 @@ export default function Dashboard() {
       .then(setTasks)
       .catch((e) => setErr(e instanceof Error ? e.message : "Failed to load"))
       .finally(() => setLoading(false));
+    api<Project[]>("/projects").then(setProjects).catch(() => {});
   }
 
   useEffect(() => {
@@ -55,7 +57,8 @@ export default function Dashboard() {
     <div className="space-y-5">
       <h1 className="text-xl font-serif text-slate-800">Dashboard</h1>
 
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+        <Kpi label="Projects" value={projects.filter((p) => p.status === "ACTIVE").length} tone="text-amber-600" Icon={FolderKanban} />
         <Kpi label="Total tasks" value={kpi.total} tone="text-slate-700" />
         <Kpi label="Active" value={kpi.active} tone="text-indigo-700" />
         <Kpi label="Overdue" value={kpi.overdue} tone="text-red-600" Icon={AlertTriangle} />
@@ -82,6 +85,41 @@ export default function Dashboard() {
               );
             })}
           </div>
+        </Card>
+
+        <Card title="My projects">
+          {projects.length === 0 ? (
+            <div className="text-sm text-slate-400 py-4">
+              No projects yet. <Link to="/projects" className="text-indigo-600 hover:underline">Create one</Link>.
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {projects.slice(0, 6).map((p) => {
+                const lead = p.members?.find((m) => m.role === "PRIMARY_LEAD");
+                return (
+                  <Link
+                    key={p.id}
+                    to={`/projects/${p.id}`}
+                    className="block border border-slate-200 rounded-md px-2.5 py-1.5 hover:border-slate-300"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-slate-800 truncate">{p.name}</span>
+                      <span className="ml-auto text-[11px] text-slate-400">{p._count?.tasks ?? 0} items</span>
+                    </div>
+                    <div className="text-[11px] text-slate-500">
+                      {lead ? `Lead: ${lead.user.fullName}` : "No lead"}
+                      {p.dueDate ? ` \u00b7 due ${fmtDate(p.dueDate)}` : ""}
+                    </div>
+                  </Link>
+                );
+              })}
+              {projects.length > 6 && (
+                <Link to="/projects" className="block text-xs text-indigo-600 hover:underline pt-1">
+                  View all {projects.length} projects
+                </Link>
+              )}
+            </div>
+          )}
         </Card>
 
         <Card title="At risk">

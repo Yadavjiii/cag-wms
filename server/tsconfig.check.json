@@ -1,0 +1,12 @@
+{
+  // Typecheck EVERYTHING, not just src. The main tsconfig scopes to src/ so the
+  // build output is right, which meant prisma/seed.ts and scripts/ were never
+  // checked at all: a duplicate declaration in the seed shipped unnoticed.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*.ts", "prisma/**/*.ts", "scripts/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

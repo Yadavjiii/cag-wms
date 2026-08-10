@@ -12,6 +12,9 @@ export const config = {
   jwtSecret: required("JWT_SECRET"),
   jwtExpiresIn: process.env.JWT_EXPIRES_IN ?? "7d",
   allowedEmailDomain: process.env.ALLOWED_EMAIL_DOMAIN ?? "cag.gov.in",
+  // Logins are minted by a Super Admin (office admins) or an Office Admin
+  // (office staff). Public sign-up stays off unless explicitly enabled.
+  allowSelfRegistration: (process.env.ALLOW_SELF_REGISTRATION ?? "false") === "true",
   clientOrigin: process.env.CLIENT_ORIGIN ?? "http://localhost:5173",
   uploadDir: process.env.UPLOAD_DIR ?? "./uploads",
   orgName: process.env.ORG_NAME ?? "CAG Work Management",

@@ -13,17 +13,53 @@ datasource db {
 // ---------- enums ----------
 // Roles, permissions and hierarchy are DATA, not code. An admin can rename,
 // add, or remove roles and remap permissions without touching the app.
+/// A Role is a bundle of permissions. It is NOT a job title: see Designation.
+///
+/// officeId NULL means a platform-owned template that the Super Admin maintains.
+/// An Office Admin clones a template into their own office and edits it there,
+/// so two offices can each have a "Reviewer" meaning different things while
+/// templateId still lets you compare them platform-wide.
 model Role {
   id          String   @id @default(uuid()) @db.Char(36)
-  name        String   @unique
+  name        String
   description String?
   level       Int      @default(0) // hierarchy: higher = more senior
-  isSystem    Boolean  @default(false) // built-in role, protected from deletion
-  isDefault   Boolean  @default(false) // auto-assigned to new sign-ups
+  officeId    String?  @db.Char(36)
+  office      Office?  @relation(fields: [officeId], references: [id])
+  templateId  String?  @db.Char(36)
+  template    Role?    @relation("RoleTemplate", fields: [templateId], references: [id])
+  clones      Role[]   @relation("RoleTemplate")
+  isSystem    Boolean  @default(false) // built-in, protected from deletion
+  isDefault   Boolean  @default(false) // auto-assigned to new accounts
   createdAt   DateTime @default(now())
 
   users       User[]
   permissions RolePermission[]
+
+  @@unique([officeId, name])
+  @@index([templateId])
+}
+
+/// A Designation is the official post someone holds (DG, SAO, AAO...). It is
+/// descriptive only: `rank` orders people for display and reporting and must
+/// NEVER be consulted by an authorisation check. Permissions come from Role.
+///
+/// officeId NULL means a platform-wide designation the Super Admin maintains;
+/// an office may add its own on top.
+model Designation {
+  id        String   @id @default(uuid()) @db.Char(36)
+  name      String
+  code      String?
+  rank      Int      @default(0) // display/report ordering only, never authorisation
+  officeId  String?  @db.Char(36)
+  office    Office?  @relation(fields: [officeId], references: [id])
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  users User[]
+
+  @@unique([officeId, name])
+  @@index([rank])
 }
 
 model Permission {
@@ -58,8 +94,33 @@ enum TaskPriority {
   URGENT
 }
 
+// Where a work request is aimed. USER = a person in my own department,
+// DEPARTMENT = a person in another department of my office (dept head approves),
+// OFFICE = another CAG office entirely (that office's head approves, then
+// nominates one of their own staff to carry it out).
+enum ProjectStatus {
+  PLANNING
+  ACTIVE
+  ON_HOLD
+  COMPLETED
+}
+
+/// A person's standing inside one project. Replaces the old standing Team.
+enum ProjectRole {
+  PRIMARY_LEAD
+  SECONDARY_LEAD
+  MEMBER
+  OBSERVER
+}
+
+enum RequestScope {
+  USER
+  DEPARTMENT
+  OFFICE
+}
+
 enum RequestState {
-  PENDING_APPROVAL   // cross-department: waiting for the target dept head
+  PENDING_APPROVAL   // cross-department/cross-office: waiting for the target head
   PENDING_ACCEPTANCE // waiting for the assignee to accept
   ACCEPTED           // assignee accepted; they now own it
   DECLINED           // assignee declined; sent back to assigner
@@ -90,12 +151,26 @@ model Office {
   name      String
   code      String?  @unique
   city      String?
+  // The IAAS-rank officer (DG / PAG / DAG) who answers for this office. They
+  // approve or reject work requests that arrive from other offices.
+  headId    String?  @db.Char(36)
+  head      User?    @relation("OfficeHead", fields: [headId], references: [id])
+  isActive  Boolean  @default(true)
+  // Offices are archived, never deleted: destroying one would take years of
+  // audit trail with it.
+  archivedAt DateTime?
   createdAt DateTime @default(now())
 
-  users       User[]
-  teams       Team[]
-  tasks       Task[]
-  departments Department[]
+  users        User[]
+  departments  Department[]
+  projects     Project[]
+  roles        Role[]
+  designations Designation[]
+  owningTasks    Task[] @relation("TaskOwningOffice")
+  executingTasks Task[] @relation("TaskExecutingOffice")
+  incomingRequests TaskRequest[] @relation("ReqOffice")
+
+  @@index([headId])
 }
 
 // A department/wing within an office. Can nest (parent) and has a head user.
@@ -117,6 +192,8 @@ model Department {
   incomingRequests TaskRequest[] @relation("ReqDept")
   createdAt   DateTime @default(now())
 
+  projects    Project[]    @relation("ProjectDept")
+
   @@index([officeId])
   @@index([parentId])
 }
@@ -124,14 +201,22 @@ model Department {
 // ---------- users (auth + profile in one table) ----------
 model User {
   id           String   @id @default(uuid()) @db.Char(36)
-  cagId        String?  @unique
+  // Renamed from cagId: nothing organisation-specific in a column name, so the
+  // platform can be rebranded for another department without a migration.
+  employeeId   String?  @unique
   fullName     String
   email        String   @unique
   passwordHash String
-  designation  String? // free text: the user's official title, typed at sign-up
+  mobile       String?
+  // The official post held. Descriptive only; permissions come from `role`.
+  designationId String? @db.Char(36)
+  designation   Designation? @relation(fields: [designationId], references: [id])
   wing         String?
   roleId       String?  @db.Char(36)
-  role         Role?    @relation(fields: [roleId], references: [id])
+  // Restrict, NOT the Prisma default of SetNull. Deleting a role that people
+  // still hold would silently strip their permissions and leave them locked
+  // out with no error anywhere. Move people off a role before deleting it.
+  role         Role?    @relation(fields: [roleId], references: [id], onDelete: Restrict)
   avatarUrl    String?
   officeId     String?  @db.Char(36)
   office       Office?  @relation(fields: [officeId], references: [id])
@@ -141,10 +226,23 @@ model User {
   managerId    String?  @db.Char(36)
   manager      User?    @relation("UserManager", fields: [managerId], references: [id])
   reports      User[]   @relation("UserManager")
+  // Account lifecycle. Logins are minted by a Super Admin (office admins) or by
+  // an Office Admin (office staff), never by self sign-up.
+  isActive           Boolean  @default(true)
+  mustChangePassword Boolean  @default(false)
+  createdById        String?  @db.Char(36)
+  createdBy          User?    @relation("UserCreator", fields: [createdById], references: [id])
+  createdUsers       User[]   @relation("UserCreator")
+  headedOffices      Office[] @relation("OfficeHead")
+  projectMemberships ProjectMember[] @relation("ProjectMembership")
+  createdProjects    Project[]       @relation("ProjectCreator")
+  lastLoginAt        DateTime?
+  // Identity provider. "local" today; SSO (NIC / Parichay / AD) later becomes a
+  // new provider rather than a rewrite of every session path.
+  authProvider       String   @default("local")
+  externalId         String?
   createdAt    DateTime @default(now())
 
-  teamsOwned      Team[]                @relation("TeamOwner")
-  memberships     TeamMember[]
   tasksCreated    Task[]                @relation("TaskCreator")
   tasksPrimary    Task[]                @relation("TaskPrimary")
   tasksSecondary  Task[]                @relation("TaskSecondary")
@@ -163,53 +261,74 @@ model User {
   @@index([roleId])
   @@index([departmentId])
   @@index([managerId])
+  @@index([createdById])
+  @@index([designationId])
+  @@index([authProvider, externalId])
 }
 
-// ---------- teams ----------
-model Team {
-  id           String   @id @default(uuid()) @db.Char(36)
+// ---------- tasks ----------
+/// A Project is the container that gathers people and work. There are no
+/// standing teams: each project forms its own working group for its own
+/// duration, and membership is editable throughout.
+model Project {
+  id           String        @id @default(uuid()) @db.Char(36)
   name         String
-  description  String?  @db.Text
-  officeId     String?  @db.Char(36)
-  office       Office?  @relation(fields: [officeId], references: [id])
-  ownerId      String?  @db.Char(36)
-  owner        User?    @relation("TeamOwner", fields: [ownerId], references: [id])
-  mergedIntoId String?  @db.Char(36)
-  mergedInto   Team?    @relation("TeamMerge", fields: [mergedIntoId], references: [id])
-  mergedFrom   Team[]   @relation("TeamMerge")
-  createdAt    DateTime @default(now())
+  code         String?
+  description  String?       @db.Text
+  status       ProjectStatus @default(ACTIVE)
+  officeId     String        @db.Char(36)
+  office       Office        @relation(fields: [officeId], references: [id])
+  departmentId String?       @db.Char(36)
+  department   Department?   @relation("ProjectDept", fields: [departmentId], references: [id])
+  createdById  String?       @db.Char(36)
+  createdBy    User?         @relation("ProjectCreator", fields: [createdById], references: [id])
+  startDate    DateTime?
+  dueDate      DateTime?
+  // Soft delete. Nothing is ever removed outright, so history survives.
+  archivedAt   DateTime?
+  archivedById String?       @db.Char(36)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
 
-  members  TeamMember[]
+  members  ProjectMember[]
   tasks    Task[]
   meetings Meeting[]
 
   @@index([officeId])
-  @@index([ownerId])
+  @@index([status])
+  @@index([archivedAt])
 }
 
-model TeamMember {
-  teamId     String   @db.Char(36)
-  team       Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  userId     String   @db.Char(36)
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  roleInTeam String   @default("member")
-  joinedAt   DateTime @default(now())
+model ProjectMember {
+  id         String      @id @default(uuid()) @db.Char(36)
+  projectId  String      @db.Char(36)
+  project    Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId     String      @db.Char(36)
+  user       User        @relation("ProjectMembership", fields: [userId], references: [id], onDelete: Cascade)
+  role       ProjectRole @default(MEMBER)
+  addedById  String?     @db.Char(36)
+  addedAt    DateTime    @default(now())
 
-  @@id([teamId, userId])
+  @@unique([projectId, userId])
   @@index([userId])
 }
 
-// ---------- tasks ----------
 model Task {
   id              String       @id @default(uuid()) @db.Char(36)
   title           String
   description     String?      @db.Text
   status          TaskStatus   @default(INITIATED)
   priority        TaskPriority @default(NORMAL)
-  officeId        String?      @db.Char(36)
-  office          Office?      @relation(fields: [officeId], references: [id])
-  teamId          String?      @db.Char(36)
-  team            Team?        @relation(fields: [teamId], references: [id])
+  // Two offices, not one. The owning office stays accountable for the outcome
+  // for the life of the work item; the executing office is whoever is actually
+  // doing it, which changes when another office accepts an inter-office
+  // request. One work item crosses the boundary; it is never duplicated.
+  owningOfficeId    String?    @db.Char(36)
+  owningOffice      Office?    @relation("TaskOwningOffice", fields: [owningOfficeId], references: [id])
+  executingOfficeId String?    @db.Char(36)
+  executingOffice   Office?    @relation("TaskExecutingOffice", fields: [executingOfficeId], references: [id])
+  projectId       String?      @db.Char(36)
+  project         Project?     @relation(fields: [projectId], references: [id])
   primaryLeadId   String?      @db.Char(36)
   primaryLead     User?        @relation("TaskPrimary", fields: [primaryLeadId], references: [id])
   secondaryLeadId String?      @db.Char(36)
@@ -223,6 +342,9 @@ model Task {
   assignedDate    DateTime?
   dueDate         DateTime?
   pctComplete     Int?
+  // Soft delete, so a removed work item stays in the audit trail.
+  archivedAt      DateTime?
+  archivedById    String?      @db.Char(36)
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
 
@@ -233,7 +355,10 @@ model Task {
   activities  ActivityLog[]
 
   @@index([primaryLeadId])
-  @@index([teamId])
+  @@index([projectId])
+  @@index([owningOfficeId])
+  @@index([executingOfficeId])
+  @@index([archivedAt])
   @@index([dueDate])
   @@index([status])
   @@index([departmentId])
@@ -250,6 +375,9 @@ model TaskRequest {
   to               User?        @relation("ReqTo", fields: [toId], references: [id])
   toDepartmentId   String?      @db.Char(36)
   toDepartment     Department?  @relation("ReqDept", fields: [toDepartmentId], references: [id])
+  toOfficeId       String?      @db.Char(36)
+  toOffice         Office?      @relation("ReqOffice", fields: [toOfficeId], references: [id])
+  scope            RequestScope @default(USER)
   message          String?      @db.Text
   state            RequestState @default(PENDING_ACCEPTANCE)
   requiresApproval Boolean      @default(false)
@@ -261,6 +389,7 @@ model TaskRequest {
   @@index([taskId])
   @@index([toId])
   @@index([toDepartmentId])
+  @@index([toOfficeId])
   @@index([state])
 }
 
@@ -297,8 +426,8 @@ model Meeting {
   id          String      @id @default(uuid()) @db.Char(36)
   title       String
   agenda      String?     @db.Text
-  teamId      String?     @db.Char(36)
-  team        Team?       @relation(fields: [teamId], references: [id])
+  projectId   String?     @db.Char(36)
+  project     Project?    @relation(fields: [projectId], references: [id])
   taskId      String?     @db.Char(36)
   task        Task?       @relation(fields: [taskId], references: [id])
   startsAt    DateTime
@@ -310,7 +439,7 @@ model Meeting {
 
   participants MeetingParticipant[]
 
-  @@index([teamId])
+  @@index([projectId])
   @@index([startsAt])
 }
 

@@ -2,7 +2,7 @@ import { Router, Request } from "express";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
 import { asyncHandler } from "../utils/http";
-import { authenticate } from "../middleware/auth";
+import { authenticate, isGlobalAdmin } from "../middleware/auth";
 import { taskVisibilityWhere } from "../services/taskAccess";
 
 export const searchRouter = Router();
@@ -24,18 +24,26 @@ searchRouter.get(
       return res.json({ tasks: [], people: [], teams: [], meetings: [] });
     }
 
-    const [tasks, people, teams, meetings] = await Promise.all([
+    // People and teams are office-local. Use the office register if you need to
+    // find another office; you still cannot assign to them directly.
+    const officeScope = isGlobalAdmin(req.user!) ? {} : { officeId: req.user!.officeId ?? "__none__" };
+
+    const [tasks, people, projects, meetings] = await Promise.all([
       prisma.task.findMany({
         where: { AND: [taskVisibilityWhere(req.user!), { OR: [{ title: { contains: q } }, { description: { contains: q } }] }] },
         select: { id: true, title: true, status: true },
         take: 8,
       }),
       prisma.user.findMany({
-        where: { OR: [{ fullName: { contains: q } }, { email: { contains: q } }, { designation: { contains: q } }] },
+        where: {
+          ...officeScope,
+          ...(isGlobalAdmin(req.user!) ? {} : { isActive: true }),
+          OR: [{ fullName: { contains: q } }, { email: { contains: q } }, { designation: { contains: q } }],
+        },
         select: { id: true, fullName: true, designation: true, email: true },
         take: 8,
       }),
-      prisma.team.findMany({ where: { name: { contains: q } }, select: { id: true, name: true }, take: 6 }),
+      prisma.project.findMany({ where: { ...officeScope, archivedAt: null, name: { contains: q } }, select: { id: true, name: true }, take: 6 }),
       prisma.meeting.findMany({
         where: { AND: [meetingVisibility(req.user!), { title: { contains: q } }] },
         select: { id: true, title: true, startsAt: true },
@@ -43,6 +51,6 @@ searchRouter.get(
       }),
     ]);
 
-    res.json({ tasks, people, teams, meetings });
+    res.json({ tasks, people, projects, meetings });
   })
 );

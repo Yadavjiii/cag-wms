@@ -115,7 +115,7 @@ export default function Meetings() {
                   <label key={p.id} className="flex items-center gap-2 px-2 py-1 text-sm hover:bg-slate-50 rounded">
                     <input type="checkbox" checked={participantIds.includes(p.id)} onChange={() => toggle(p.id)} />
                     <span>{p.fullName}</span>
-                    {p.designation && <span className="text-xs text-slate-400">{p.designation}</span>}
+                    {p.designation && <span className="text-xs text-slate-400">{p.designation?.name}</span>}
                   </label>
                 ))}
               </div>

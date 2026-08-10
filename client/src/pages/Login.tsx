@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useBranding } from "../branding";
-import { useNavigate, Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { ShieldCheck } from "lucide-react";
 import { useAuth } from "../auth/AuthContext";
 import { Button, ErrorText } from "../components/ui";
@@ -50,7 +50,8 @@ export default function Login() {
             {busy ? "Signing in..." : "Sign in"}
           </Button>
           <p className="text-sm text-slate-500 text-center">
-            No account? <Link to="/register" className="link">Create one</Link>
+            Accounts are issued by your office administrator. If you cannot sign in,
+            contact them for your credentials or a password reset.
           </p>
         </form>
       </div>

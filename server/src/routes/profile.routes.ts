@@ -2,17 +2,17 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../prisma";
 import { asyncHandler } from "../utils/http";
-import { authenticate } from "../middleware/auth";
+import { authenticate, isGlobalAdmin } from "../middleware/auth";
 
 export const profileRouter = Router();
 profileRouter.use(authenticate);
 
 const publicSelect = {
   id: true,
-  cagId: true,
+  employeeId: true,
   fullName: true,
   email: true,
-  designation: true,
+  designation: { select: { id: true, name: true, code: true, rank: true } },
   wing: true,
   role: { select: { id: true, name: true, level: true } },
   avatarUrl: true,
@@ -30,13 +30,14 @@ profileRouter.get(
   })
 );
 
+// Note: officeId is deliberately NOT editable here. Which office you belong to
+// is an administrative fact set by an admin, not a self-service preference.
+// Allowing it would let anyone walk into another office's data.
 const updateSchema = z.object({
   fullName: z.string().min(2).optional(),
-  designation: z.string().optional(),
+  designationId: z.string().nullable().optional(),
   wing: z.string().optional(),
   avatarUrl: z.string().url().optional(),
-  cagId: z.string().optional(),
-  officeId: z.string().optional(),
 });
 
 // PATCH /api/profiles/me  -  a user may edit only their own profile
@@ -54,10 +55,15 @@ profileRouter.get(
   "/",
   asyncHandler(async (req, res) => {
     const q = String(req.query.q ?? "").trim();
+    // The directory is office-scoped. You cannot assign work directly to
+    // someone in another office anyway; that goes through an inter-office
+    // request, so there is no reason to list them here.
+    const officeScope = isGlobalAdmin(req.user!) ? {} : { officeId: req.user!.officeId ?? "__none__", isActive: true };
     const users = await prisma.user.findMany({
-      where: q
-        ? { OR: [{ fullName: { contains: q } }, { email: { contains: q } }, { cagId: { contains: q } }] }
-        : undefined,
+      where: {
+        ...officeScope,
+        ...(q ? { OR: [{ fullName: { contains: q } }, { email: { contains: q } }, { employeeId: { contains: q } }] } : {}),
+      },
       select: publicSelect,
       orderBy: { fullName: "asc" },
       take: 200,

@@ -33,17 +33,55 @@ export default function Layout() {
     return () => document.removeEventListener("mousedown", onDoc);
   }, []);
 
-  const items: NavItem[] = [
-    { to: "/", label: "Dashboard", end: true, show: true },
-    { to: "/tasks", label: "Tasks", show: true },
-    { to: "/approvals", label: "Approvals", show: true },
-    { to: "/meetings", label: "Meetings", show: true },
-    { to: "/teams", label: "Teams", show: true },
-    { to: "/departments", label: "Departments", show: !!user?.permissions?.includes("department.manage") },
-    { to: "/reports", label: "Reports", show: !!user?.permissions?.includes("report.view") },
-    { to: "/admin", label: "Admin", show: !!user?.permissions?.includes("role.manage") },
-    { to: "/profile", label: "Profile", show: true },
-  ].filter((i) => i.show);
+  /**
+   * The menu shows one job, not every page. A Super Admin runs the platform,
+   * an Office Admin runs one office, and everybody else does the actual work.
+   * Showing all three sets to all three audiences is what made "where do I
+   * create an office?" a hard question.
+   */
+  const perms = user?.permissions ?? [];
+  const isSuperAdmin = perms.includes("office.manage_all");
+  const isOfficeAdmin = !isSuperAdmin && perms.includes("staff.manage");
+
+  let items: NavItem[];
+
+  if (isSuperAdmin) {
+    // Platform operator: offices, the office admins inside them, role
+    // templates, and global settings. Not a participant in daily work.
+    items = [
+      { to: "/", label: "Dashboard", end: true },
+      { to: "/superadmin", label: "Offices" },
+      { to: "/roles", label: "Roles" },
+      { to: "/admin", label: "Settings" },
+      { to: "/profile", label: "Profile" },
+    ];
+  } else if (isOfficeAdmin) {
+    // Runs one office: its people, its structure, its work, its reports.
+    items = [
+      { to: "/", label: "Dashboard", end: true },
+      { to: "/staff", label: "Staff" },
+      { to: "/roles", label: "Roles" },
+      { to: "/departments", label: "Departments" },
+      { to: "/projects", label: "Projects" },
+      { to: "/reports", label: "Reports", show: perms.includes("report.view") },
+      { to: "/profile", label: "Profile" },
+    ];
+  } else {
+    // Everyone else: their work and the people they do it with.
+    items = [
+      { to: "/", label: "Dashboard", end: true },
+      { to: "/tasks", label: "Tasks" },
+      { to: "/projects", label: "Projects" },
+      { to: "/meetings", label: "Meetings" },
+      { to: "/calendar", label: "Calendar" },
+      { to: "/approvals", label: "Approvals" },
+      { to: "/offices", label: "Offices", show: perms.includes("office.request") || !!user?.headsOfficeIds?.length },
+      { to: "/reports", label: "Reports", show: perms.includes("report.view") },
+      { to: "/profile", label: "Profile" },
+    ];
+  }
+
+  items = items.filter((i) => i.show !== false);
 
   // Primary tabs stay visible; the rest fold into a "More" menu.
   const primary = items.slice(0, 5);
@@ -110,7 +148,7 @@ export default function Layout() {
               <span className="tn-ava">{initials}</span>
               <span className="tn-uinfo">
                 <span className="tn-nm">{user?.fullName}</span>
-                <span className="tn-rl">{user?.role?.name ?? "No role"}</span>
+                <span className="tn-rl">{user?.roleName ?? user?.role?.name ?? "No role"}</span>
               </span>
             </div>
           </div>

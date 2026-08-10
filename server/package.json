@@ -11,7 +11,13 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev --name init",
     "prisma:studio": "prisma studio",
-    "seed": "tsx prisma/seed.ts"
+    "seed": "tsx prisma/seed.ts",
+    "check:tenancy": "tsx scripts/check-tenancy.ts",
+    "doctor": "tsx scripts/doctor.ts",
+    "check:schema": "prisma validate",
+    "typecheck": "tsc --noEmit -p tsconfig.check.json",
+    "verify": "npm run check:schema && npm run check:schema-refs && npm run typecheck && npm run check:tenancy",
+    "check:schema-refs": "tsx scripts/check-schema-refs.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.19.0",
@@ -36,5 +42,8 @@
     "prisma": "^5.19.0",
     "tsx": "^4.16.0",
     "typescript": "^5.5.0"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
   }
 }
