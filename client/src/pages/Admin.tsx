@@ -4,13 +4,13 @@ import { api, uploadFile } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { useBranding } from "../branding";
 import { Card, Button, ErrorText } from "../components/ui";
-import { RoleRef } from "../types";
+import { RoleRef, Designation } from "../types";
 
 interface AdminUser {
   id: string;
   fullName: string;
   email: string;
-  designation?: string | null;
+  designation?: Designation | null;
   wing?: string | null;
   role?: RoleRef | null;
   office?: { id: string; name: string } | null;
@@ -167,7 +167,7 @@ export default function Admin() {
               {users.map((u) => (
                 <tr key={u.id} className="border-b border-slate-50">
                   <td className="py-2 pr-3 font-medium text-slate-700">{u.fullName}</td>
-                  <td className="py-2 pr-3 text-slate-500">{u.designation ?? "-"}</td>
+                  <td className="py-2 pr-3 text-slate-500">{u.designation?.name ?? "-"}</td>
                   <td className="py-2 pr-3 text-slate-500">{u.email}</td>
                   <td className="py-2 pr-3">
                     <select

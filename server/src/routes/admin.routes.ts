@@ -4,6 +4,7 @@ import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../utils/http";
 import { authenticate, requirePermission, isGlobalAdmin } from "../middleware/auth";
 import { notify } from "../services/notify";
+import { VISIBLE } from "../services/accountLifecycle";
 
 export const adminRouter = Router();
 adminRouter.use(authenticate);
@@ -49,6 +50,7 @@ adminRouter.get(
     const officeScope = isGlobalAdmin(req.user!) ? {} : { officeId: req.user!.officeId ?? "__none__" };
     const users = await prisma.user.findMany({
       where: {
+        ...VISIBLE,
         ...officeScope,
         ...(q ? { OR: [{ fullName: { contains: q } }, { email: { contains: q } }] } : {}),
       },

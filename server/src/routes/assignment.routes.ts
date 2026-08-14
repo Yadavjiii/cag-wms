@@ -30,7 +30,9 @@ async function loadAssignment(id: string) {
 /**
  * Who may decide on an incoming request?
  *   - OFFICE scope: the head of the target office (a DG/PAG/DAG or other IAAS
- *     officer), or anyone in that office holding "office.approve".
+ *     officer), or anyone in that office holding "office.approve". If the
+ *     office has NO head appointed yet, its Office Admin decides instead, so a
+ *     request from another office is never left with nobody to answer it.
  *   - DEPARTMENT scope: the head of the target department, or a global approver.
  */
 function isApprover(user: ReqUser, a: { scope: RequestScope; toOffice?: { id: string; headId: string | null } | null; toDepartment?: { headId: string | null } | null }): boolean {
@@ -39,7 +41,10 @@ function isApprover(user: ReqUser, a: { scope: RequestScope; toOffice?: { id: st
     const officeId = a.toOffice?.id;
     if (!officeId) return false;
     if (a.toOffice?.headId === user.id) return true;
-    return user.headsOfficeIds.includes(officeId) || (user.officeId === officeId && user.permissions.includes("office.approve"));
+    if (user.headsOfficeIds.includes(officeId)) return true;
+    if (user.officeId === officeId && user.permissions.includes("office.approve")) return true;
+    // Fallback: no head appointed, so the office admin answers for the office.
+    return a.toOffice?.headId === null && user.officeId === officeId && user.permissions.includes("staff.manage");
   }
   return user.permissions.includes("task.approve") || (!!a.toDepartment?.headId && a.toDepartment.headId === user.id);
 }
@@ -63,6 +68,11 @@ assignmentRouter.get(
     if (user.headsOfficeIds.length) clauses.push({ scope: RequestScope.OFFICE, toOfficeId: { in: user.headsOfficeIds } });
     if (user.officeId && user.permissions.includes("office.approve")) {
       clauses.push({ scope: RequestScope.OFFICE, toOfficeId: user.officeId });
+    }
+    // Same fallback as isApprover: while an office has no head, its admin sees
+    // the incoming requests, otherwise they would sit in nobody's queue.
+    if (user.officeId && user.permissions.includes("staff.manage")) {
+      clauses.push({ scope: RequestScope.OFFICE, toOfficeId: user.officeId, toOffice: { headId: null } });
     }
 
     const items = await prisma.taskRequest.findMany({

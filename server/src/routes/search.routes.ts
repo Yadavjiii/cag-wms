@@ -4,6 +4,7 @@ import { prisma } from "../prisma";
 import { asyncHandler } from "../utils/http";
 import { authenticate, isGlobalAdmin } from "../middleware/auth";
 import { taskVisibilityWhere } from "../services/taskAccess";
+import { VISIBLE } from "../services/accountLifecycle";
 
 export const searchRouter = Router();
 searchRouter.use(authenticate);
@@ -36,11 +37,17 @@ searchRouter.get(
       }),
       prisma.user.findMany({
         where: {
+          ...VISIBLE,
           ...officeScope,
           ...(isGlobalAdmin(req.user!) ? {} : { isActive: true }),
-          OR: [{ fullName: { contains: q } }, { email: { contains: q } }, { designation: { contains: q } }],
+          OR: [{ fullName: { contains: q } }, { email: { contains: q } }, { designation: { name: { contains: q } } }],
         },
-        select: { id: true, fullName: true, designation: true, email: true },
+        select: {
+          id: true,
+          fullName: true,
+          designation: { select: { id: true, name: true, code: true, rank: true } },
+          email: true,
+        },
         take: 8,
       }),
       prisma.project.findMany({ where: { ...officeScope, archivedAt: null, name: { contains: q } }, select: { id: true, name: true }, take: 6 }),

@@ -1,16 +1,20 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { Card, PageHeader, Field, TextInput, Button, ErrorText, EmptyState, SkeletonRows } from "../components/ui";
-import { Office, StaffAccount, CreatedAccount, Person } from "../types";
+import { Office, StaffAccount, CreatedAccount, CreatedOffice, Person } from "../types";
 import { fmtDate } from "../lib/format";
 import CredentialSlip from "../components/CredentialSlip";
 
 /**
- * Super Admin console. Two jobs live here and nowhere else:
- *   1. Register a CAG office.
- *   2. Create that office's Office Admin, who then creates their own staff.
- * Appointing the office head (DG / PAG / DAG) also happens here, because the
- * head is who other offices will send their work requests to.
+ * Super Admin console.
+ *
+ * Registering an office and issuing its login are ONE act: "PAG Hyderabad" is
+ * both the office on the register and the account that administers its people.
+ * So the form asks for the office name, its mailbox and a password, and out
+ * comes a working Office Admin login. That admin then creates their own staff.
+ *
+ * Appointing the head (DG / PAG / DAG) also happens here, because the head is
+ * who other offices send their work requests to.
  */
 export default function SuperAdmin() {
   const [offices, setOffices] = useState<Office[] | null>(null);
@@ -21,15 +25,12 @@ export default function SuperAdmin() {
   const [busy, setBusy] = useState(false);
   const [issued, setIssued] = useState<CreatedAccount | null>(null);
 
-  // new office form
+  // One form creates the office and its admin login together.
   const [oName, setOName] = useState("");
   const [oCode, setOCode] = useState("");
   const [oCity, setOCity] = useState("");
-
-  // new office admin form
-  const [aName, setAName] = useState("");
-  const [aEmail, setAEmail] = useState("");
-  const [aDesignation, setADesignation] = useState("");
+  const [oEmail, setOEmail] = useState("");
+  const [oPassword, setOPassword] = useState("");
 
   async function loadOffices() {
     try {
@@ -64,44 +65,26 @@ export default function SuperAdmin() {
     setBusy(true);
     setErr(null);
     try {
-      const office = await api<Office>("/superadmin/offices", {
+      const created = await api<CreatedOffice>("/superadmin/offices", {
         method: "POST",
-        body: JSON.stringify({ name: oName, code: oCode || undefined, city: oCity || undefined }),
+        body: JSON.stringify({
+          name: oName,
+          code: oCode || undefined,
+          city: oCity || undefined,
+          email: oEmail,
+          password: oPassword,
+        }),
       });
+      setIssued({ user: created.admin });
       setOName("");
       setOCode("");
       setOCity("");
+      setOEmail("");
+      setOPassword("");
       await loadOffices();
-      await openOffice(office);
+      await openOffice(created.office);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Could not create the office");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function createAdmin(e: React.FormEvent) {
-    e.preventDefault();
-    if (!selected) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      const created = await api<CreatedAccount>(`/superadmin/offices/${selected.id}/admins`, {
-        method: "POST",
-        body: JSON.stringify({
-          fullName: aName,
-          email: aEmail,
-          designation: aDesignation || undefined,
-        }),
-      });
-      setIssued(created);
-      setAName("");
-      setAEmail("");
-      setADesignation("");
-      await openOffice(selected);
-      await loadOffices();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Could not create the office admin");
     } finally {
       setBusy(false);
     }
@@ -143,28 +126,51 @@ export default function SuperAdmin() {
     <div className="space-y-4">
       <PageHeader
         title="Offices & office admins"
-        subtitle="Register each CAG office, appoint its head, and issue the office admin login that will create the rest of that office's staff."
+        subtitle="Create each office with its login in one step, then appoint its head. The office admin creates the rest of that office's staff."
       />
       <ErrorText>{err}</ErrorText>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
         <div className="space-y-4">
-          <Card title="Register an office">
+          <Card title="Create an office">
             <form onSubmit={createOffice} className="space-y-3">
               <Field label="Office name">
-                <TextInput value={oName} onChange={(e) => setOName(e.target.value)} placeholder="PAG (Audit) Maharashtra" required />
+                <TextInput value={oName} onChange={(e) => setOName(e.target.value)} placeholder="PAG Hyderabad" required />
               </Field>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Code">
-                  <TextInput value={oCode} onChange={(e) => setOCode(e.target.value)} placeholder="PAG-MH" />
+                  <TextInput value={oCode} onChange={(e) => setOCode(e.target.value)} placeholder="PAG-HYD" />
                 </Field>
                 <Field label="City">
-                  <TextInput value={oCity} onChange={(e) => setOCity(e.target.value)} placeholder="Mumbai" />
+                  <TextInput value={oCity} onChange={(e) => setOCity(e.target.value)} placeholder="Hyderabad" />
                 </Field>
               </div>
-              <Button type="submit" disabled={busy || oName.trim().length < 2}>
-                Register office
+              <Field label="Office email (this becomes the login username)">
+                <TextInput
+                  type="email"
+                  value={oEmail}
+                  onChange={(e) => setOEmail(e.target.value)}
+                  placeholder="pag.hyderabad@cag.gov.in"
+                  required
+                />
+              </Field>
+              <Field label="Password">
+                <TextInput
+                  type="text"
+                  value={oPassword}
+                  onChange={(e) => setOPassword(e.target.value)}
+                  placeholder="At least 8 characters"
+                  required
+                />
+              </Field>
+              <Button type="submit" disabled={busy || oName.trim().length < 2 || !oEmail || oPassword.length < 8}>
+                Create office and issue login
               </Button>
+              <p className="text-xs text-slate-500">
+                This creates the office and its Office Admin login in one step. The account is named after the office and
+                exists to manage that office's staff. The credentials are emailed to the address above, and the office can
+                change the password once signed in.
+              </p>
             </form>
           </Card>
 
@@ -190,7 +196,10 @@ export default function SuperAdmin() {
                       <span className="ml-auto text-xs text-slate-400">{o._count?.users ?? 0} staff</span>
                     </div>
                     <div className="text-xs text-slate-500 mt-0.5">
-                      {o.head ? `Head: ${o.head.fullName}${o.head.designation ? ` (${o.head.designation})` : ""}` : "No head appointed"}
+                      {o.email ?? "no mailbox"}
+                    </div>
+                    <div className="text-xs text-slate-500">
+                      {o.head ? `Head: ${o.head.fullName}${o.head.designation ? ` (${o.head.designation.name})` : ""}` : "No head appointed"}
                     </div>
                   </button>
                 ))}
@@ -220,41 +229,23 @@ export default function SuperAdmin() {
                     {members.map((m) => (
                       <option key={m.id} value={m.id}>
                         {m.fullName}
-                        {m.designation ? ` \u2014 ${m.designation}` : ""}
+                        {m.designation ? ` \u2014 ${m.designation.name}` : ""}
                       </option>
                     ))}
                   </select>
                 </Field>
                 <p className="text-xs text-slate-500 mt-2">
-                  Only a member of this office can head it. Create the staff first, then appoint from this list.
+                  Only a member of this office can head it, so the office admin creates the staff first and you appoint the
+                  head from this list. Until a head is appointed, incoming requests from other offices go to the office
+                  admin.
                 </p>
-              </Card>
-
-              <Card title="Create an office admin">
-                <form onSubmit={createAdmin} className="space-y-3">
-                  <Field label="Full name">
-                    <TextInput value={aName} onChange={(e) => setAName(e.target.value)} required />
-                  </Field>
-                  <Field label="Official email">
-                    <TextInput type="email" value={aEmail} onChange={(e) => setAEmail(e.target.value)} placeholder="admin.mh@cag.gov.in" required />
-                  </Field>
-                  <Field label="Designation">
-                    <TextInput value={aDesignation} onChange={(e) => setADesignation(e.target.value)} placeholder="Administrative Officer" />
-                  </Field>
-                  <Button type="submit" disabled={busy || !aName || !aEmail}>
-                    Create login
-                  </Button>
-                  <p className="text-xs text-slate-500">
-                    A temporary password is generated and shown once. The admin must change it at first login.
-                  </p>
-                </form>
               </Card>
 
               {issued && <CredentialSlip account={issued} onDismiss={() => setIssued(null)} />}
 
-              <Card title={`Office admins (${admins.length})`}>
+              <Card title={`Admin logins (${admins.length})`}>
                 {admins.length === 0 ? (
-                  <EmptyState>No admin has been created for this office yet.</EmptyState>
+                  <EmptyState>This office has no admin login. That should not happen; contact support.</EmptyState>
                 ) : (
                   <div className="space-y-2">
                     {admins.map((a) => (

@@ -5,6 +5,9 @@ import { asyncHandler, HttpError } from "../utils/http";
 import { authenticate, requirePermission } from "../middleware/auth";
 import { createAccount, createAccountSchema, accountSelect, resetPassword } from "../services/provisioning";
 import { notify } from "../services/notify";
+import { deleteAccount } from "../services/accountLifecycle";
+import { resolveOfficeAdminRoleId, assertNotPlatformRole, OFFICE_ADMIN_ROLE_FILTER } from "../services/roles";
+import { VISIBLE } from "../services/accountLifecycle";
 
 /**
  * Super Admin surface. Everything here is gated on "office.manage_all", the
@@ -20,6 +23,7 @@ const officeSelect = {
   name: true,
   code: true,
   city: true,
+  email: true,
   isActive: true,
   archivedAt: true,
   createdAt: true,
@@ -43,23 +47,65 @@ const officeSchema = z.object({
   name: z.string().min(2),
   code: z.string().min(2).optional(),
   city: z.string().optional(),
+  /** The office mailbox. This becomes the Office Admin username. */
+  email: z.string().email(),
+  /** Set by the Super Admin and handed over. The office changes it later. */
+  password: z.string().min(8, "Password must be at least 8 characters"),
 });
 
-// POST /api/superadmin/offices  -  register a new CAG office
+/**
+ * POST /api/superadmin/offices
+ *
+ * Registers an office AND mints its Office Admin login in one act, because in
+ * practice they are the same thing: "PAG Hyderabad" is both the office on the
+ * register and the account that administers its people. The two are still
+ * separate rows, so a second admin can be appointed or the office handed over
+ * later without unpicking anything.
+ *
+ * The admin account is named after the office on purpose. It manages staff
+ * logins and does no audit work, so it never appears as an assignee.
+ */
 superAdminRouter.post(
   "/offices",
   asyncHandler(async (req, res) => {
     const data = officeSchema.parse(req.body);
+
     if (data.code) {
       const clash = await prisma.office.findUnique({ where: { code: data.code }, select: { id: true } });
       if (clash) throw new HttpError(409, "An office with that code already exists");
     }
-    const office = await prisma.office.create({ data, select: officeSelect });
-    res.status(201).json(office);
+    const emailClash = await prisma.user.findUnique({ where: { email: data.email }, select: { id: true } });
+    if (emailClash) throw new HttpError(409, "That email is already in use by another account");
+
+    const officeAdminRoleId = await resolveOfficeAdminRoleId();
+
+    const office = await prisma.office.create({
+      data: { name: data.name, code: data.code, city: data.city, email: data.email },
+      select: { id: true, name: true },
+    });
+
+    let admin;
+    try {
+      admin = await createAccount(req.user!, {
+        fullName: office.name,
+        email: data.email,
+        password: data.password,
+        roleId: officeAdminRoleId,
+        officeId: office.id,
+        mustChangePassword: false,
+      });
+    } catch (e) {
+      // Never leave a headless office behind if the account failed to mint.
+      await prisma.office.delete({ where: { id: office.id } }).catch(() => undefined);
+      throw e;
+    }
+
+    const full = await prisma.office.findUniqueOrThrow({ where: { id: office.id }, select: officeSelect });
+    res.status(201).json({ office: full, admin: admin.user });
   })
 );
 
-const officeUpdateSchema = officeSchema.partial().extend({
+const officeUpdateSchema = officeSchema.omit({ password: true }).partial().extend({
   headId: z.string().nullable().optional(),
   isActive: z.boolean().optional(),
 });
@@ -138,8 +184,9 @@ superAdminRouter.get(
   asyncHandler(async (req, res) => {
     const admins = await prisma.user.findMany({
       where: {
+        ...VISIBLE,
         officeId: req.params.id,
-        role: { permissions: { some: { permission: { key: "staff.manage" } } } },
+        role: OFFICE_ADMIN_ROLE_FILTER,
       },
       orderBy: { fullName: "asc" },
       select: accountSelect,
@@ -159,17 +206,10 @@ superAdminRouter.post(
   asyncHandler(async (req, res) => {
     const body = officeAdminSchema.parse(req.body);
 
-    let roleId = body.roleId;
-    if (!roleId) {
-      // Default to whichever role carries staff.manage, i.e. the Office Admin role.
-      const role = await prisma.role.findFirst({
-        where: { permissions: { some: { permission: { key: "staff.manage" } } } },
-        orderBy: { level: "desc" },
-        select: { id: true },
-      });
-      if (!role) throw new HttpError(500, 'No role grants "staff.manage". Re-run the seed.');
-      roleId = role.id;
-    }
+    // A caller-supplied roleId must still be an office role, never a platform
+    // one, or this endpoint becomes a way to mint a second Super Admin.
+    const roleId = body.roleId ?? (await resolveOfficeAdminRoleId());
+    if (body.roleId) await assertNotPlatformRole(body.roleId);
 
     const result = await createAccount(req.user!, { ...body, roleId, officeId: req.params.id });
     res.status(201).json(result);
@@ -184,6 +224,7 @@ superAdminRouter.get(
     const officeId = req.query.officeId as string | undefined;
     const users = await prisma.user.findMany({
       where: {
+        ...VISIBLE,
         ...(officeId ? { officeId } : {}),
         ...(q ? { OR: [{ fullName: { contains: q } }, { email: { contains: q } }, { employeeId: { contains: q } }] } : {}),
       },
@@ -203,12 +244,24 @@ superAdminRouter.post(
   })
 );
 
+// DELETE /api/superadmin/users/:id  -  delete any account in any office,
+// including an office's own admin login. Tombstoned, so history survives.
+superAdminRouter.delete(
+  "/users/:id",
+  asyncHandler(async (req, res) => {
+    res.json(await deleteAccount(req.user!, req.params.id));
+  })
+);
+
 // PATCH /api/superadmin/users/:id/active  -  suspend or restore any account
 superAdminRouter.patch(
   "/users/:id/active",
   asyncHandler(async (req, res) => {
     const { isActive } = z.object({ isActive: z.boolean() }).parse(req.body);
     if (req.params.id === req.user!.id) throw new HttpError(400, "You cannot deactivate your own account");
+    // platform-scope: this whole router is gated on office.manage_all, which is
+    // the Super Admin's defining permission. Working across every office is the
+    // job, not a leak.
     const user = await prisma.user.update({ where: { id: req.params.id }, data: { isActive }, select: accountSelect });
     res.json(user);
   })

@@ -92,7 +92,7 @@ export default function Approvals() {
         </div>
         <div className="text-xs text-slate-500 mt-1">
           {a.from?.fullName ?? "Someone"}
-          {a.from?.designation ? ` (${a.from.designation})` : ""}
+          {a.from?.designation ? ` (${a.from.designation.name})` : ""}
           {" \u2192 "}
           {isOffice ? a.toOffice?.name ?? "your office" : a.to?.fullName ?? "someone"}
         </div>
@@ -130,7 +130,7 @@ export default function Approvals() {
                       {(roster[a.toOffice?.id ?? ""] ?? []).map((m) => (
                         <option key={m.id} value={m.id}>
                           {m.fullName}
-                          {m.designation ? ` \u2014 ${m.designation}` : ""}
+                          {m.designation ? ` \u2014 ${m.designation.name}` : ""}
                           {m.department ? ` (${m.department.name})` : ""}
                         </option>
                       ))}

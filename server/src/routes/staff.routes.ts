@@ -4,6 +4,8 @@ import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../utils/http";
 import { authenticate, requirePermission, isGlobalAdmin, assertOfficeScope } from "../middleware/auth";
 import { createAccount, createAccountSchema, accountSelect, resetPassword } from "../services/provisioning";
+import { deleteAccount } from "../services/accountLifecycle";
+import { VISIBLE } from "../services/accountLifecycle";
 
 /**
  * Office Admin surface: create and manage the logins for one office's staff
@@ -39,6 +41,7 @@ staffRouter.get(
 
     const staff = await prisma.user.findMany({
       where: {
+        ...VISIBLE,
         officeId,
         ...(includeInactive ? {} : { isActive: true }),
         ...(q ? { OR: [{ fullName: { contains: q } }, { email: { contains: q } }, { employeeId: { contains: q } }, { designation: { name: { contains: q } } }] } : {}),
@@ -51,14 +54,30 @@ staffRouter.get(
   })
 );
 
-// GET /api/staff/assignable-roles  -  roles this admin is allowed to hand out
+/**
+ * GET /api/staff/assignable-roles  -  roles this admin may hand out.
+ *
+ * Three filters, all of them load-bearing:
+ *   1. Below my own level      - anti-escalation.
+ *   2. A platform template OR my own office's role - without this, the dropdown
+ *      listed every other office's custom roles too, which both leaked their
+ *      internal structure and made the list ambiguous.
+ *   3. Not a platform role     - office.manage_all is never assignable here.
+ */
 staffRouter.get(
   "/assignable-roles",
   asyncHandler(async (req, res) => {
+    const user = req.user!;
     const roles = await prisma.role.findMany({
-      where: isGlobalAdmin(req.user!) ? {} : { level: { lt: req.user!.level } },
-      orderBy: { level: "desc" },
-      select: { id: true, name: true, description: true, level: true },
+      where: isGlobalAdmin(user)
+        ? {}
+        : {
+            level: { lt: user.level },
+            OR: [{ officeId: null }, { officeId: user.officeId ?? "__none__" }],
+            NOT: { permissions: { some: { permission: { key: "office.manage_all" } } } },
+          },
+      orderBy: [{ level: "desc" }, { name: "asc" }],
+      select: { id: true, name: true, description: true, level: true, officeId: true },
     });
     res.json(roles);
   })
@@ -91,9 +110,9 @@ const updateSchema = z.object({
 async function loadStaff(req: Request) {
   const target = await prisma.user.findUnique({
     where: { id: req.params.id },
-    select: { id: true, officeId: true, role: { select: { level: true } } },
+    select: { id: true, officeId: true, deletedAt: true, role: { select: { level: true } } },
   });
-  if (!target) throw new HttpError(404, "Staff member not found");
+  if (!target || target.deletedAt) throw new HttpError(404, "Staff member not found");
   assertOfficeScope(req.user!, target.officeId);
   if (!isGlobalAdmin(req.user!) && (target.role?.level ?? 0) >= req.user!.level) {
     throw new HttpError(403, "You cannot manage an account at or above your own level");
@@ -146,13 +165,30 @@ staffRouter.post(
   })
 );
 
-// DELETE /api/staff/:id  -  deactivate rather than delete, so history survives
+/**
+ * DELETE /api/staff/:id  -  delete a staff account.
+ *
+ * The person disappears from the office: gone from the roster, from search,
+ * from every assignee and member picker, and unable to sign in. Their name
+ * still resolves on the work they did, which is what keeps the audit trail
+ * readable. See services/accountLifecycle.ts.
+ */
 staffRouter.delete(
   "/:id",
   asyncHandler(async (req, res) => {
     const target = await loadStaff(req);
-    if (target.id === req.user!.id) throw new HttpError(400, "You cannot deactivate your own account");
-    await prisma.user.update({ where: { id: target.id }, data: { isActive: false } });
-    res.status(204).end();
+    res.json(await deleteAccount(req.user!, target.id));
+  })
+);
+
+// PATCH /api/staff/:id/active  -  suspend without deleting
+staffRouter.patch(
+  "/:id/active",
+  asyncHandler(async (req, res) => {
+    const target = await loadStaff(req);
+    const { isActive } = z.object({ isActive: z.boolean() }).parse(req.body);
+    if (target.id === req.user!.id && !isActive) throw new HttpError(400, "You cannot suspend your own account");
+    const user = await prisma.user.update({ where: { id: target.id }, data: { isActive }, select: accountSelect });
+    res.json(user);
   })
 );

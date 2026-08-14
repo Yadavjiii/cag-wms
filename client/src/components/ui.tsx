@@ -97,3 +97,66 @@ export function SkeletonRows({ count = 4 }: { count?: number }) {
     </div>
   );
 }
+
+/**
+ * Tabs.
+ *
+ * A work item and a project each carry six or seven panels' worth of
+ * information, and stacking them all vertically produced a page nobody scrolled
+ * to the bottom of. State is held by the caller so a tab choice can survive a
+ * reload or be driven from a link.
+ */
+export function Tabs<T extends string>({
+  tabs,
+  active,
+  onChange,
+}: {
+  tabs: { key: T; label: string; count?: number; badge?: "red" | "amber" }[];
+  active: T;
+  onChange: (key: T) => void;
+}) {
+  return (
+    <div className="flex gap-1 overflow-x-auto border-b border-slate-200 -mb-px">
+      {tabs.map((t) => (
+        <button
+          key={t.key}
+          type="button"
+          onClick={() => onChange(t.key)}
+          className={
+            "relative inline-flex items-center gap-1.5 px-3.5 py-2 text-[13px] font-semibold whitespace-nowrap border-b-2 " +
+            (active === t.key
+              ? "border-[color:var(--gold)] text-[color:var(--brand)]"
+              : "border-transparent text-slate-500 hover:text-slate-800")
+          }
+        >
+          {t.label}
+          {t.count !== undefined && t.count > 0 && (
+            <span
+              className={
+                "text-[10px] px-1.5 py-0.5 rounded-full tabular-nums font-bold " +
+                (t.badge === "red"
+                  ? "bg-red-100 text-red-700"
+                  : t.badge === "amber"
+                    ? "bg-amber-100 text-amber-700"
+                    : "bg-slate-100 text-slate-600")
+              }
+            >
+              {t.count}
+            </span>
+          )}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** A labelled statistic, for the dense summary strips on the detail pages. */
+export function Stat({ label, value, tone }: { label: string; value: ReactNode; tone?: "red" | "amber" | "green" }) {
+  const cls = tone === "red" ? "text-red-600" : tone === "amber" ? "text-amber-600" : tone === "green" ? "text-emerald-600" : "text-slate-800";
+  return (
+    <div className="bg-slate-50 border border-slate-100 rounded-md px-2.5 py-2">
+      <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold truncate">{label}</div>
+      <div className={`text-sm font-semibold mt-0.5 tabular-nums ${cls}`}>{value}</div>
+    </div>
+  );
+}

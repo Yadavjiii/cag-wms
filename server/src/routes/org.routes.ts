@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../utils/http";
 import { authenticate, requirePermission, isGlobalAdmin } from "../middleware/auth";
+import { VISIBLE } from "../services/accountLifecycle";
 
 type ReqUser = NonNullable<Request["user"]>;
 
@@ -10,54 +11,97 @@ type ReqUser = NonNullable<Request["user"]>;
 export const officeRouter = Router();
 officeRouter.use(authenticate);
 
-const officeDirectorySelect = {
+/** What your OWN office (or a Super Admin) may see: everything. */
+const officeFullSelect = {
   id: true,
   name: true,
   code: true,
   city: true,
+  email: true,
   isActive: true,
   head: { select: { id: true, fullName: true, designation: { select: { id: true, name: true, code: true, rank: true } }, email: true } },
   _count: { select: { departments: true, users: true, owningTasks: true, projects: true } },
 } as const;
 
-// GET /api/offices  -  the directory of registered CAG offices. Every signed-in
-// user can see which offices exist and who heads them, because that is exactly
-// the information you need before asking another office to take on work.
+/**
+ * What ANOTHER office may see: the name, where it is, who heads it, and the
+ * office mailbox. That is everything you need in order to route work to them
+ * and nothing you could use to go around them. No headcount, no departments,
+ * no staff, and not the head's personal email either.
+ */
+const officeForeignSelect = {
+  id: true,
+  name: true,
+  code: true,
+  city: true,
+  email: true,
+  isActive: true,
+  head: { select: { id: true, fullName: true, designation: { select: { id: true, name: true, code: true, rank: true } } } },
+} as const;
+
+/** Is this office the caller's own? */
+function isOwnOffice(user: ReqUser, officeId: string): boolean {
+  return isGlobalAdmin(user) || user.officeId === officeId || user.headsOfficeIds.includes(officeId);
+}
+
+// GET /api/offices  -  the directory. Your own office comes back in full; every
+// other office comes back as name, city, head and mailbox, which is what you
+// need to send them work and no more.
 officeRouter.get(
   "/",
   asyncHandler(async (req, res) => {
-    const offices = await prisma.office.findMany({
-      where: isGlobalAdmin(req.user!) ? {} : { isActive: true },
-      orderBy: { name: "asc" },
-      select: officeDirectorySelect,
-    });
-    res.json(offices);
+    const user = req.user!;
+    if (isGlobalAdmin(user)) {
+      const all = await prisma.office.findMany({ orderBy: { name: "asc" }, select: officeFullSelect });
+      return res.json(all);
+    }
+
+    const [mine, others] = await Promise.all([
+      user.officeId
+        ? prisma.office.findMany({ where: { id: user.officeId }, select: officeFullSelect })
+        : Promise.resolve([]),
+      prisma.office.findMany({
+        where: { isActive: true, ...(user.officeId ? { id: { not: user.officeId } } : {}) },
+        orderBy: { name: "asc" },
+        select: officeForeignSelect,
+      }),
+    ]);
+    res.json([...mine, ...others]);
   })
 );
 
-// GET /api/offices/:id  -  one office with its departments and its head
+// GET /api/offices/:id  -  one office. Departments are part of an office's
+// internal structure, so they are only included for your own office.
 officeRouter.get(
   "/:id",
   asyncHandler(async (req, res) => {
+    const own = isOwnOffice(req.user!, req.params.id);
     const office = await prisma.office.findUnique({
       where: { id: req.params.id },
-      select: {
-        ...officeDirectorySelect,
-        departments: { select: { id: true, name: true, code: true }, orderBy: { name: "asc" } },
-      },
+      select: own
+        ? { ...officeFullSelect, departments: { select: { id: true, name: true, code: true }, orderBy: { name: "asc" as const } } }
+        : officeForeignSelect,
     });
     if (!office) throw new HttpError(404, "Office not found");
     res.json(office);
   })
 );
 
-// GET /api/offices/:id/members  -  the roster of an office. Heads browse this
-// when deciding who to nominate for incoming work.
+/**
+ * GET /api/offices/:id/members  -  the roster of an office.
+ *
+ * Your own office only. Another office's staff list is theirs: you route work
+ * to the office and their head nominates the person. Before this check, any
+ * signed-in user could pull any office's full roster with email addresses.
+ */
 officeRouter.get(
   "/:id/members",
   asyncHandler(async (req, res) => {
+    if (!isOwnOffice(req.user!, req.params.id)) {
+      throw new HttpError(403, "You can only view the staff of your own office");
+    }
     const members = await prisma.user.findMany({
-      where: { officeId: req.params.id, isActive: true },
+      where: { ...VISIBLE, officeId: req.params.id, isActive: true },
       orderBy: [{ role: { level: "desc" } }, { fullName: "asc" }],
       take: 500,
       select: {
@@ -74,20 +118,12 @@ officeRouter.get(
   })
 );
 
-const officeSchema = z.object({ name: z.string().min(2), code: z.string().optional(), city: z.string().optional() });
-
-// POST /api/offices  -  see also /api/superadmin/offices, which is the richer surface.
-// Registering an office is a platform-level act, so it needs office.manage_all,
-// not the office-local office.manage.
-officeRouter.post(
-  "/",
-  requirePermission("office.manage_all"),
-  asyncHandler(async (req, res) => {
-    const data = officeSchema.parse(req.body);
-    const office = await prisma.office.create({ data, select: officeDirectorySelect });
-    res.status(201).json(office);
-  })
-);
+/**
+ * Office creation lives ONLY on POST /api/superadmin/offices, because an office
+ * and its Office Admin login are created together in one act. A bare office
+ * with no admin is not a usable state, so the old duplicate endpoint that
+ * created one has been removed.
+ */
 
 // ============================ DEPARTMENTS ============================
 export const departmentRouter = Router();
@@ -200,6 +236,48 @@ departmentRouter.patch(
     }
     const updated = await prisma.department.update({ where: { id: dept.id }, data, select: deptSelect });
     res.json(updated);
+  })
+);
+
+/**
+ * DELETE /api/departments/:id  -  remove an empty department.
+ *
+ * Refused while anything still points at it, and the message says exactly what,
+ * because the alternative (cascading) would silently detach people from their
+ * wing or orphan work items. Empty out the department first, then delete it.
+ */
+departmentRouter.delete(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    const dept = await prisma.department.findUnique({
+      where: { id: req.params.id },
+      select: {
+        id: true,
+        name: true,
+        headId: true,
+        officeId: true,
+        _count: { select: { members: true, children: true, tasks: true, projects: true, incomingRequests: true } },
+      },
+    });
+    if (!dept) throw new HttpError(404, "Department not found");
+    if (!canManageDept(req.user!, dept)) throw new HttpError(403, "You cannot manage this department");
+
+    const blockers: string[] = [];
+    if (dept._count.members) blockers.push(`${dept._count.members} member(s)`);
+    if (dept._count.children) blockers.push(`${dept._count.children} sub-department(s)`);
+    if (dept._count.tasks) blockers.push(`${dept._count.tasks} work item(s)`);
+    if (dept._count.projects) blockers.push(`${dept._count.projects} project(s)`);
+    if (dept._count.incomingRequests) blockers.push(`${dept._count.incomingRequests} pending request(s)`);
+
+    if (blockers.length) {
+      throw new HttpError(
+        400,
+        `"${dept.name}" still has ${blockers.join(", ")}. Move or remove them first, then delete the department.`
+      );
+    }
+
+    await prisma.department.delete({ where: { id: dept.id } });
+    res.status(204).end();
   })
 );
 

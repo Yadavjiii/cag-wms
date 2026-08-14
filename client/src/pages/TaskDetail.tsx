@@ -1,15 +1,51 @@
 import { useEffect, useState } from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
-import { ArrowLeft, Trash2 } from "lucide-react";
-import { Task, TaskStatus, Person, Assignment, RequestState, Attachment, ActivityEntry } from "../types";
-import { Card, Button, ErrorText } from "../components/ui";
-import { useAuth } from "../auth/AuthContext";
-import { api, uploadFile, downloadFile } from "../api/client";
-import { rag, ragText, statusLabel, fmtDate, describeAction, fmtDateTime } from "../lib/format";
-import { useRealtime } from "../realtime";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import {
+  AlertOctagon,
+  AlertTriangle,
+  ArrowLeft,
+  CalendarClock,
+  CheckCircle2,
+  Clock,
+  History,
+  MapPin,
+  Trash2,
+  Users,
+  Video,
+} from "lucide-react";
+import { api } from "../api/client";
+import {
+  ActivityEntry,
+  Assignment,
+  Person,
+  RequestState,
+  Task,
+  TaskDashboard,
+  TaskPriority,
+  TaskStatus,
+} from "../types";
+import { Button, Card, EmptyState, ErrorText, Field, PageHeader, Skeleton, Tabs } from "../components/ui";
+import { BarList, Kpi, Ring, statusColour } from "../components/charts";
+import Discussion from "../components/Discussion";
+import Attachments from "../components/Attachments";
 import ProjectPanel from "../components/ProjectPanel";
+import { useAuth } from "../auth/AuthContext";
+import {
+  describeAction,
+  fmtDate,
+  fmtDateTime,
+  priorityChip,
+  priorityLabel,
+  rag,
+  ragText,
+  statusLabel,
+  timeAgo,
+} from "../lib/format";
+import { useRealtime } from "../realtime";
 
 const STATUSES: TaskStatus[] = ["YET_TO_BE_ASSIGNED", "INITIATED", "IN_PROGRESS", "FINISHED", "ON_HOLD"];
+const PRIORITIES: TaskPriority[] = ["LOW", "NORMAL", "HIGH", "URGENT"];
+
 const stateLabel: Record<RequestState, string> = {
   PENDING_APPROVAL: "Awaiting dept approval",
   PENDING_ACCEPTANCE: "Awaiting acceptance",
@@ -26,403 +62,589 @@ const stateCls: Record<RequestState, string> = {
   REJECTED: "border-red-200 text-red-700 bg-red-50",
   CANCELLED: "border-slate-200 text-slate-500 bg-slate-50",
 };
-const input = "w-full border border-slate-200 rounded-md px-3 py-2 text-sm outline-none focus:border-indigo-400";
 
+type Tab = "overview" | "discussion" | "files" | "assignment" | "activity";
+
+/**
+ * One work item, in full.
+ *
+ * The page used to be a single column of eight stacked cards, which meant the
+ * discussion (the part people actually come here for) sat below the fold under
+ * three forms. Tabs put the conversation one click from the top and leave the
+ * overview free to answer "where is this and is it in trouble" at a glance.
+ */
 export default function TaskDetail() {
   const { id } = useParams<{ id: string }>();
-  const [task, setTask] = useState<Task | null>(null);
+  const navigate = useNavigate();
+  const { user } = useAuth();
+
+  const [tab, setTab] = useState<Tab>("overview");
+  const [data, setData] = useState<TaskDashboard | null>(null);
   const [people, setPeople] = useState<Person[]>([]);
+  const [assignments, setAssignments] = useState<Assignment[]>([]);
+  const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // editable fields
-  const [status, setStatus] = useState<TaskStatus>("INITIATED");
-  const [pct, setPct] = useState(0);
-  const [primaryLeadId, setPrimaryLeadId] = useState("");
-  const [secondaryLeadId, setSecondaryLeadId] = useState("");
-  const [currentlyWithId, setCurrentlyWithId] = useState("");
-  const [dueDate, setDueDate] = useState("");
+  // The edit form, seeded from the item every time it reloads.
+  const [form, setForm] = useState({
+    status: "INITIATED" as TaskStatus,
+    priority: "NORMAL" as TaskPriority,
+    pct: 0,
+    primaryLeadId: "",
+    secondaryLeadId: "",
+    currentlyWithId: "",
+    dueDate: "",
+  });
 
-  // comment box
-  const [comment, setComment] = useState("");
-  const [authorRole, setAuthorRole] = useState("");
-
-  // assignment workflow
-  const { user } = useAuth();
-  const navigate = useNavigate();
-
-  /** Deleting archives the work item. It stays recoverable from the Tasks list. */
-  async function deleteTask() {
-    if (!task) return;
-    if (!confirm(`Delete "${task.title}"? It is archived rather than destroyed, and can be restored.`)) return;
-    try {
-      await api(`/tasks/${task.id}`, { method: "DELETE" });
-      navigate("/tasks");
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Could not delete this work item");
-    }
-  }
-  const [assignments, setAssignments] = useState<Assignment[]>([]);
+  // Assignment controls
   const [assignTo, setAssignTo] = useState("");
   const [assignMsg, setAssignMsg] = useState("");
 
-  // documents
-  const [files, setFiles] = useState<Attachment[]>([]);
-  const [uploading, setUploading] = useState(false);
-
-  // activity timeline
-  const [activity, setActivity] = useState<ActivityEntry[]>([]);
-  async function loadActivity() {
-    try {
-      setActivity(await api<ActivityEntry[]>(`/tasks/${id}/activity`));
-    } catch {
-      /* ignore */
-    }
-  }
-
-  async function loadFiles() {
-    try {
-      setFiles(await api<Attachment[]>(`/tasks/${id}/attachments`));
-    } catch {
-      /* ignore */
-    }
-  }
-
-  async function onUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setUploading(true);
-    setErr(null);
-    try {
-      await uploadFile(`/tasks/${id}/attachments`, file);
-      await loadFiles();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Upload failed");
-    } finally {
-      setUploading(false);
-      e.target.value = "";
-    }
-  }
-
-  async function removeFile(attId: string) {
-    setErr(null);
-    try {
-      await api(`/attachments/${attId}`, { method: "DELETE" });
-      await loadFiles();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Delete failed");
-    }
-  }
-
-  async function download(att: Attachment) {
-    try {
-      await downloadFile(`/attachments/${att.id}/download`, att.fileName);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Download failed");
-    }
+  async function load() {
+    const d = await api<TaskDashboard>(`/tasks/${id}/dashboard`);
+    setData(d);
+    setForm({
+      status: d.task.status,
+      priority: d.task.priority ?? "NORMAL",
+      pct: d.task.pctComplete ?? 0,
+      primaryLeadId: d.task.primaryLead?.id ?? "",
+      secondaryLeadId: d.task.secondaryLead?.id ?? "",
+      currentlyWithId: d.task.currentlyWith?.id ?? "",
+      dueDate: d.task.dueDate ? d.task.dueDate.slice(0, 10) : "",
+    });
   }
 
   async function loadAssignments() {
     try {
       setAssignments(await api<Assignment[]>(`/tasks/${id}/assignments`));
     } catch {
-      /* ignore */
+      /* the movement history is not worth failing the page over */
     }
   }
 
-  async function assign() {
-    if (!assignTo) return;
-    setBusy(true);
-    setErr(null);
+  async function loadActivity() {
     try {
-      await api(`/tasks/${id}/assign`, { method: "POST", body: JSON.stringify({ toUserId: assignTo, message: assignMsg || undefined }) });
-      setAssignTo("");
-      setAssignMsg("");
-      await load();
-      await loadAssignments();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Failed to assign");
-    } finally {
-      setBusy(false);
+      setActivity(await api<ActivityEntry[]>(`/tasks/${id}/activity`));
+    } catch {
+      /* ditto */
     }
-  }
-
-  async function act(assignmentId: string, action: string) {
-    setBusy(true);
-    setErr(null);
-    try {
-      await api(`/assignments/${assignmentId}/${action}`, { method: "POST" });
-      await load();
-      await loadAssignments();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Action failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function load() {
-    const t = await api<Task>(`/tasks/${id}`);
-    setTask(t);
-    setStatus(t.status);
-    setPct(t.pctComplete ?? 0);
-    setPrimaryLeadId(t.primaryLead?.id ?? "");
-    setSecondaryLeadId(t.secondaryLead?.id ?? "");
-    setCurrentlyWithId(t.currentlyWith?.id ?? "");
-    setDueDate(t.dueDate ? t.dueDate.slice(0, 10) : "");
   }
 
   useEffect(() => {
-    load().catch((e) => setErr(e instanceof Error ? e.message : "Failed to load"));
+    setData(null);
+    load().catch((e) => setErr(e instanceof Error ? e.message : "Failed to load this work item"));
     api<Person[]>("/profiles").then(setPeople).catch(() => {});
     loadAssignments();
-    loadFiles();
     loadActivity();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   useRealtime("task:changed", (p) => {
     if (!p || (p as { taskId?: string }).taskId === id) {
-      load();
+      load().catch(() => {});
       loadAssignments();
       loadActivity();
     }
   });
 
-  async function save() {
+  async function run(fn: () => Promise<void>) {
     setBusy(true);
     setErr(null);
     try {
-      await api<Task>(`/tasks/${id}`, {
+      await fn();
+      await load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Something went wrong");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const save = () =>
+    run(async () => {
+      await api(`/tasks/${id}`, {
         method: "PATCH",
         body: JSON.stringify({
-          status,
-          pctComplete: pct,
-          primaryLeadId: primaryLeadId || undefined,
-          secondaryLeadId: secondaryLeadId || undefined,
-          currentlyWithId: currentlyWithId || undefined,
-          dueDate: dueDate || undefined,
+          status: form.status,
+          priority: form.priority,
+          pctComplete: form.pct,
+          primaryLeadId: form.primaryLeadId || undefined,
+          secondaryLeadId: form.secondaryLeadId || undefined,
+          currentlyWithId: form.currentlyWithId || undefined,
+          dueDate: form.dueDate || undefined,
         }),
       });
-      await load();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Failed to save");
-    } finally {
-      setBusy(false);
-    }
-  }
+      await loadActivity();
+    });
 
-  async function addComment(e: React.FormEvent) {
-    e.preventDefault();
-    if (!comment.trim()) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      await api(`/tasks/${id}/comments`, {
+  const assign = () =>
+    run(async () => {
+      await api(`/tasks/${id}/assign`, {
         method: "POST",
-        body: JSON.stringify({ body: comment, authorRole: authorRole || undefined }),
+        body: JSON.stringify({ toUserId: assignTo, message: assignMsg || undefined }),
       });
-      setComment("");
-      setAuthorRole("");
-      await load();
+      setAssignTo("");
+      setAssignMsg("");
+      await loadAssignments();
+    });
+
+  const act = (assignmentId: string, action: string) =>
+    run(async () => {
+      await api(`/assignments/${assignmentId}/${action}`, { method: "POST" });
+      await loadAssignments();
+    });
+
+  async function deleteTask() {
+    if (!data) return;
+    if (!confirm(`Delete "${data.task.title}"? It is archived rather than destroyed, and can be restored.`)) return;
+    try {
+      await api(`/tasks/${id}`, { method: "DELETE" });
+      navigate("/tasks");
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Failed to add remark");
-    } finally {
-      setBusy(false);
+      setErr(e instanceof Error ? e.message : "Could not delete this work item");
     }
   }
 
-  if (!task) return <div className="text-slate-500">{err ?? "Loading task..."}</div>;
+  if (!data) {
+    return (
+      <div className="space-y-4">
+        <ErrorText>{err}</ErrorText>
+        {!err && (
+          <>
+            <Skeleton className="h-9 w-72" />
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <Skeleton key={i} className="h-20" />
+              ))}
+            </div>
+            <Skeleton className="h-64" />
+          </>
+        )}
+      </div>
+    );
+  }
 
-  const r = rag(status, dueDate);
+  const { task, health, counts } = data;
+  const r = rag(task.status, task.dueDate);
   const peopleOptions = (empty: string) => (
     <>
       <option value="">{empty}</option>
       {people.map((p) => (
-        <option key={p.id} value={p.id}>{p.fullName}</option>
+        <option key={p.id} value={p.id}>
+          {p.fullName}
+          {p.designation ? ` (${p.designation.name})` : ""}
+        </option>
       ))}
     </>
   );
 
   return (
-    <div className="space-y-4 max-w-3xl">
+    <div className="space-y-4">
       <Link to="/tasks" className="inline-flex items-center gap-1 text-sm text-slate-500 hover:text-slate-700">
-        <ArrowLeft className="w-4 h-4" /> Back to tasks
+        <ArrowLeft className="w-4 h-4" /> Back to work items
       </Link>
 
-      <div className="flex items-start gap-3">
-        <div>
-          <h1 className="text-xl font-serif text-slate-800">{task.title}</h1>
-          <p className="text-sm text-slate-500 mt-0.5">{task.description || "No description"}</p>
-        </div>
-        <span className={`ml-auto text-sm font-semibold ${ragText[r.key]}`}>{r.label}</span>
-        <button
-          onClick={deleteTask}
-          title="Delete this work item"
-          className="flex items-center gap-1 text-xs px-2 py-1.5 rounded border border-slate-200 text-slate-500 hover:border-rose-300 hover:text-rose-600 hover:bg-rose-50"
-        >
-          <Trash2 className="w-3.5 h-3.5" /> Delete
-        </button>
-      </div>
+      <PageHeader
+        title={task.title}
+        subtitle={
+          [
+            task.project ? `Project: ${task.project.name}` : null,
+            statusLabel[task.status],
+            `${task.pctComplete ?? 0}% complete`,
+            task.dueDate ? `due ${fmtDate(task.dueDate)}` : "no due date",
+          ]
+            .filter(Boolean)
+            .join(" \u00b7 ")
+        }
+        actions={
+          <div className="flex items-center gap-2">
+            <span className={`text-sm font-semibold ${ragText[r.key]}`}>{r.label}</span>
+            {data.canEdit && (
+              <button
+                onClick={deleteTask}
+                title="Delete this work item"
+                className="flex items-center gap-1 text-xs px-2 py-1.5 rounded border border-slate-200 text-slate-500 hover:border-rose-300 hover:text-rose-600 hover:bg-rose-50"
+              >
+                <Trash2 className="w-3.5 h-3.5" /> Delete
+              </button>
+            )}
+          </div>
+        }
+      />
+
       {task.archivedAt && (
         <div className="text-sm text-rose-700 bg-rose-50 border border-rose-200 rounded-md px-3 py-2">
-          This work item was deleted. It is kept for the audit trail and can be restored from the Tasks list.
+          This work item was deleted. It is kept for the audit trail and can be restored from the work list.
         </div>
       )}
 
+      {/* Anything actively blocking the work outranks every other panel. */}
+      {data.openBlockers.map((b) => (
+        <div key={b.id} className="flex gap-2.5 text-sm bg-rose-50 border border-rose-200 rounded-lg px-3.5 py-3">
+          <AlertOctagon className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+          <div className="min-w-0">
+            <div className="font-semibold text-rose-800">Blocked</div>
+            <div className="text-rose-900 whitespace-pre-wrap">{b.body}</div>
+            <div className="text-[11px] text-rose-600 mt-1">
+              {b.author?.fullName ?? "Someone"} &middot; {timeAgo(b.createdAt)}. Clear it from the Discussion tab once
+              it is resolved.
+            </div>
+          </div>
+        </div>
+      ))}
+
       <ErrorText>{err}</ErrorText>
 
-      <Card title="Details">
-        <div className="grid md:grid-cols-2 gap-3">
-          <div>
-            <label className="text-xs uppercase tracking-wide text-slate-400">Status</label>
-            <div className="flex flex-wrap gap-1.5 mt-1">
-              {STATUSES.map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => setStatus(s)}
-                  className={
-                    "text-xs px-2.5 py-1 rounded-full border " +
-                    (status === s ? "bg-indigo-950 text-white border-indigo-950" : "bg-white border-slate-200 text-slate-600 hover:border-slate-300")
-                  }
-                >
-                  {statusLabel[s]}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <Kpi
+          label="Completion"
+          value={`${task.pctComplete ?? 0}%`}
+          tone={(task.pctComplete ?? 0) >= 100 ? "green" : "navy"}
+          Icon={CheckCircle2}
+        />
+        <Kpi
+          label={health.overdue ? "Overdue by" : "Due in"}
+          value={health.daysToDue === null ? "-" : `${Math.abs(health.daysToDue)}d`}
+          tone={health.overdue ? "red" : health.daysToDue !== null && health.daysToDue <= 3 ? "amber" : "plain"}
+          Icon={Clock}
+          hint={task.dueDate ? fmtDate(task.dueDate) : "No due date set"}
+        />
+        <Kpi label="Age" value={`${health.ageDays}d`} hint="Since it was raised" Icon={History} />
+        <Kpi
+          label="Last reported"
+          value={health.daysSinceUpdate === 0 ? "Today" : `${health.daysSinceUpdate}d ago`}
+          tone={health.stale ? "amber" : "plain"}
+          hint={health.stale ? `Stale after ${health.staleAfterDays} days` : undefined}
+          Icon={AlertTriangle}
+        />
+        <Kpi label="Discussion" value={counts.posts} hint={`${counts.updates} progress update(s)`} Icon={Users} />
+      </div>
+
+      <Tabs<Tab>
+        tabs={[
+          { key: "overview", label: "Overview" },
+          { key: "discussion", label: "Discussion", count: counts.posts, badge: counts.blockers ? "red" : undefined },
+          { key: "files", label: "Files", count: counts.files },
+          { key: "assignment", label: "Assignment", count: counts.handovers },
+          { key: "activity", label: "Activity", count: counts.activity },
+        ]}
+        active={tab}
+        onChange={setTab}
+      />
+
+      {tab === "overview" && (
+        <div className="space-y-4">
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+            <Card title="Details">
+              {task.description && (
+                <p className="text-sm text-slate-700 whitespace-pre-wrap mb-4 pb-4 border-b border-slate-100">
+                  {task.description}
+                </p>
+              )}
+
+              <div className="grid md:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs uppercase tracking-wide text-slate-400">Status</label>
+                  <div className="flex flex-wrap gap-1.5 mt-1">
+                    {STATUSES.map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        disabled={!data.canReportProgress}
+                        onClick={() => setForm({ ...form, status: s })}
+                        className={
+                          "text-xs px-2.5 py-1 rounded-full border disabled:opacity-50 " +
+                          (form.status === s
+                            ? "bg-[color:var(--brand)] text-white border-[color:var(--brand)]"
+                            : "bg-white border-slate-200 text-slate-600 hover:border-slate-300")
+                        }
+                      >
+                        {statusLabel[s]}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs uppercase tracking-wide text-slate-400">Priority</label>
+                  <div className="flex flex-wrap gap-1.5 mt-1">
+                    {PRIORITIES.map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        disabled={!data.canEdit}
+                        onClick={() => setForm({ ...form, priority: p })}
+                        className={
+                          "text-xs px-2.5 py-1 rounded-full border disabled:opacity-50 " +
+                          (form.priority === p
+                            ? priorityChip[p] + " ring-1 ring-offset-1 ring-slate-300"
+                            : "bg-white border-slate-200 text-slate-600 hover:border-slate-300")
+                        }
+                      >
+                        {priorityLabel[p]}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="md:col-span-2">
+                  <label className="text-xs uppercase tracking-wide text-slate-400">
+                    Completion &mdash; {form.pct}%
+                  </label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={5}
+                    disabled={!data.canReportProgress}
+                    value={form.pct}
+                    onChange={(e) => setForm({ ...form, pct: Number(e.target.value) })}
+                    className="w-full mt-2 accent-[color:var(--brand)]"
+                  />
+                </div>
+
+                <Field label="Primary lead">
+                  <select
+                    className="input"
+                    disabled={!data.canEdit}
+                    value={form.primaryLeadId}
+                    onChange={(e) => setForm({ ...form, primaryLeadId: e.target.value })}
+                  >
+                    {peopleOptions("Unassigned")}
+                  </select>
+                </Field>
+                <Field label="Secondary lead">
+                  <select
+                    className="input"
+                    disabled={!data.canEdit}
+                    value={form.secondaryLeadId}
+                    onChange={(e) => setForm({ ...form, secondaryLeadId: e.target.value })}
+                  >
+                    {peopleOptions("None")}
+                  </select>
+                </Field>
+                <Field label="Currently with">
+                  <select
+                    className="input"
+                    disabled={!data.canEdit}
+                    value={form.currentlyWithId}
+                    onChange={(e) => setForm({ ...form, currentlyWithId: e.target.value })}
+                  >
+                    {peopleOptions("None")}
+                  </select>
+                </Field>
+                <Field label="Due date">
+                  <input
+                    type="date"
+                    className="input"
+                    disabled={!data.canEdit}
+                    value={form.dueDate}
+                    onChange={(e) => setForm({ ...form, dueDate: e.target.value })}
+                  />
+                </Field>
+              </div>
+
+              <div className="mt-4 flex flex-wrap items-center gap-3">
+                <Button onClick={save} disabled={busy || (!data.canEdit && !data.canReportProgress)}>
+                  {busy ? "Saving..." : "Save changes"}
+                </Button>
+                <button className="btn btn-sm" onClick={() => setTab("discussion")}>
+                  Report progress with a note
                 </button>
+                <span className="text-xs text-slate-400">
+                  Raised {fmtDate(task.createdAt)} by {task.createdBy?.fullName ?? "-"}
+                </span>
+              </div>
+              {!data.canEdit && !data.canReportProgress && (
+                <p className="text-xs text-slate-500 mt-2">
+                  You can read this item and post on its thread, but not change its fields. Ask a lead to add you to
+                  the project if you need to report on it.
+                </p>
+              )}
+            </Card>
+
+            <div className="space-y-4">
+              <Card title="Progress">
+                <div className="flex items-center gap-4">
+                  <Ring
+                    value={task.pctComplete ?? 0}
+                    label="done"
+                    sublabel={statusLabel[task.status]}
+                  />
+                  <div className="text-xs text-slate-500 space-y-1 min-w-0">
+                    <div>
+                      Lead: <b className="text-slate-700">{task.primaryLead?.fullName ?? "nobody yet"}</b>
+                    </div>
+                    <div>
+                      With: <b className="text-slate-700">{task.currentlyWith?.fullName ?? "nobody"}</b>
+                    </div>
+                    {data.lastUpdate ? (
+                      <div>
+                        Last reported {timeAgo(data.lastUpdate.createdAt)} by{" "}
+                        {data.lastUpdate.author?.fullName ?? "someone"}
+                      </div>
+                    ) : (
+                      <div className="text-amber-700">No progress has ever been reported on this item.</div>
+                    )}
+                  </div>
+                </div>
+              </Card>
+
+              <Card title="Time in each state">
+                <BarList
+                  rows={data.timeInStatus.map((s) => ({
+                    label: statusLabel[s.status as TaskStatus] ?? s.status,
+                    value: Math.round(s.days),
+                    colour: statusColour[s.status],
+                    note: `${s.days}d`,
+                  }))}
+                  emptyText="No movement recorded yet."
+                />
+              </Card>
+
+              <Card title={`Who has worked on this (${data.contributors.length})`}>
+                {data.contributors.length === 0 ? (
+                  <EmptyState>Nobody has posted on this item yet.</EmptyState>
+                ) : (
+                  <div className="space-y-1.5">
+                    {data.contributors.map((c) => (
+                      <div key={c.id} className="flex items-center gap-2 text-sm">
+                        <span className="truncate">{c.name}</span>
+                        <span className="ml-auto text-xs text-slate-400 shrink-0">
+                          {c.posts} post{c.posts === 1 ? "" : "s"} &middot; {timeAgo(c.lastAt)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </Card>
+            </div>
+          </div>
+
+          {data.meetings.upcoming.length > 0 && (
+            <Card title="Upcoming meetings on this item">
+              <div className="space-y-1.5">
+                {data.meetings.upcoming.map((m) => (
+                  <div key={m.id} className="flex items-center gap-2 text-sm border border-slate-200 rounded-md px-3 py-2">
+                    <CalendarClock className="w-4 h-4 text-slate-400 shrink-0" />
+                    <span className="font-medium truncate">{m.title}</span>
+                    <span className="text-xs text-slate-500 flex items-center gap-1 shrink-0">
+                      {m.mode === "ONLINE" ? <Video className="w-3 h-3" /> : <MapPin className="w-3 h-3" />}
+                      {m.mode === "ONLINE" ? "Online" : m.location ?? "Venue TBC"}
+                    </span>
+                    <span className="ml-auto text-xs text-slate-400 shrink-0">{fmtDateTime(m.startsAt)}</span>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+
+          <ProjectPanel task={task} onChanged={load} />
+        </div>
+      )}
+
+      {tab === "discussion" && (
+        <Discussion
+          scope="task"
+          id={task.id}
+          currentStatus={task.status}
+          currentPct={task.pctComplete ?? 0}
+          canReportProgress={data.canReportProgress}
+          onChanged={load}
+        />
+      )}
+
+      {tab === "files" && <Attachments scope="task" id={task.id} canUpload />}
+
+      {tab === "assignment" && (
+        <Card title="Assignment and movement">
+          {data.canEdit && (
+            <>
+              <div className="flex flex-wrap items-end gap-2">
+                <div className="grow min-w-[12rem]">
+                  <Field label="Hand this to">
+                    <select className="input" value={assignTo} onChange={(e) => setAssignTo(e.target.value)}>
+                      {peopleOptions("Select a person...")}
+                    </select>
+                  </Field>
+                </div>
+                <input
+                  value={assignMsg}
+                  onChange={(e) => setAssignMsg(e.target.value)}
+                  placeholder="Message (optional)"
+                  className="input grow"
+                />
+                <Button onClick={assign} disabled={busy || !assignTo}>
+                  Assign
+                </Button>
+              </div>
+              <p className="text-xs text-slate-400 mt-1 mb-4">
+                Assigning into another department needs that department head's approval before it activates.
+              </p>
+            </>
+          )}
+
+          <div className="space-y-2">
+            {assignments.length === 0 && <EmptyState>This work item has not moved between people yet.</EmptyState>}
+            {assignments.map((a) => (
+              <div key={a.id} className="border border-slate-200 rounded-md px-3 py-2">
+                <div className="flex items-center gap-2 text-sm flex-wrap">
+                  <span className="font-medium text-slate-700">{a.from?.fullName ?? "Someone"}</span>
+                  <span className="text-slate-400">&rarr;</span>
+                  <span className="font-medium text-slate-700">
+                    {a.to?.fullName ?? a.toOffice?.name ?? a.toDepartment?.name ?? "Someone"}
+                  </span>
+                  {a.toDepartment && <span className="text-xs text-slate-400">into {a.toDepartment.name}</span>}
+                  <span className={`ml-auto text-[11px] px-1.5 py-0.5 rounded-full border ${stateCls[a.state]}`}>
+                    {stateLabel[a.state]}
+                  </span>
+                </div>
+                {a.message && <div className="text-xs text-slate-500 mt-1">&ldquo;{a.message}&rdquo;</div>}
+                <div className="text-[11px] text-slate-400 mt-1">{fmtDateTime(a.createdAt)}</div>
+                {a.state === "PENDING_ACCEPTANCE" && a.to?.id === user?.id && (
+                  <div className="flex gap-2 mt-2">
+                    <Button size="sm" onClick={() => act(a.id, "accept")} disabled={busy}>
+                      Accept
+                    </Button>
+                    <button className="btn btn-sm" onClick={() => act(a.id, "decline")} disabled={busy}>
+                      Decline
+                    </button>
+                  </div>
+                )}
+                {(a.state === "PENDING_ACCEPTANCE" || a.state === "PENDING_APPROVAL") && a.from?.id === user?.id && (
+                  <div className="mt-2">
+                    <button className="btn btn-sm" onClick={() => act(a.id, "cancel")} disabled={busy}>
+                      Cancel
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {tab === "activity" && (
+        <Card title="Activity timeline">
+          {activity.length === 0 ? (
+            <EmptyState>Nothing has been recorded against this item yet.</EmptyState>
+          ) : (
+            <div className="space-y-1.5">
+              {activity.map((a) => (
+                <div key={a.id} className="text-sm flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-slate-300 shrink-0" />
+                  <span className="text-slate-700">{a.actor?.fullName ?? "Someone"}</span>
+                  <span className="text-slate-500 truncate">{describeAction(a.action)}</span>
+                  <span className="ml-auto text-xs text-slate-400 shrink-0" title={fmtDateTime(a.createdAt)}>
+                    {timeAgo(a.createdAt)}
+                  </span>
+                </div>
               ))}
             </div>
-          </div>
-          <div>
-            <label className="text-xs uppercase tracking-wide text-slate-400">Completion - {pct}%</label>
-            <input type="range" min={0} max={100} step={10} value={pct} onChange={(e) => setPct(Number(e.target.value))} className="w-full mt-2 accent-indigo-700" />
-          </div>
-          <div>
-            <label className="text-xs uppercase tracking-wide text-slate-400">Primary lead</label>
-            <select value={primaryLeadId} onChange={(e) => setPrimaryLeadId(e.target.value)} className={`mt-1 ${input}`}>{peopleOptions("Unassigned")}</select>
-          </div>
-          <div>
-            <label className="text-xs uppercase tracking-wide text-slate-400">Secondary lead</label>
-            <select value={secondaryLeadId} onChange={(e) => setSecondaryLeadId(e.target.value)} className={`mt-1 ${input}`}>{peopleOptions("None")}</select>
-          </div>
-          <div>
-            <label className="text-xs uppercase tracking-wide text-slate-400">Currently with</label>
-            <select value={currentlyWithId} onChange={(e) => setCurrentlyWithId(e.target.value)} className={`mt-1 ${input}`}>{peopleOptions("None")}</select>
-          </div>
-          <div>
-            <label className="text-xs uppercase tracking-wide text-slate-400">Due date</label>
-            <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} className={`mt-1 ${input}`} />
-          </div>
-        </div>
-        <div className="mt-4 flex items-center gap-3">
-          <Button onClick={save} disabled={busy}>{busy ? "Saving..." : "Save changes"}</Button>
-          <span className="text-xs text-slate-400">Assigned {fmtDate(task.assignedDate)} - created by {task.createdBy?.fullName ?? "-"}</span>
-        </div>
-      </Card>
-
-      <ProjectPanel task={task} onChanged={load} />
-
-      <Card title="Assignment & movement">
-        <div className="flex flex-wrap items-end gap-2">
-          <div className="grow min-w-[12rem]">
-            <label className="text-xs uppercase tracking-wide text-slate-400">Assign to</label>
-            <select value={assignTo} onChange={(e) => setAssignTo(e.target.value)} className={`mt-1 ${input}`}>
-              <option value="">Select a person...</option>
-              {people.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.fullName}
-                  {p.designation ? ` (${p.designation})` : ""}
-                </option>
-              ))}
-            </select>
-          </div>
-          <input value={assignMsg} onChange={(e) => setAssignMsg(e.target.value)} placeholder="Message (optional)" className={`${input} grow`} />
-          <Button onClick={assign} disabled={busy || !assignTo}>Assign</Button>
-        </div>
-        <p className="text-xs text-slate-400 mt-1">
-          Assigning into another department needs that department head's approval before it activates.
-        </p>
-
-        <div className="mt-4 space-y-2">
-          {assignments.length === 0 && <div className="text-sm text-slate-400">No assignment history yet.</div>}
-          {assignments.map((a) => (
-            <div key={a.id} className="border border-slate-200 rounded-md px-3 py-2">
-              <div className="flex items-center gap-2 text-sm">
-                <span className="font-medium text-slate-700">{a.from?.fullName ?? "Someone"}</span>
-                <span className="text-slate-400">&rarr;</span>
-                <span className="font-medium text-slate-700">{a.to?.fullName ?? "Someone"}</span>
-                {a.toDepartment && <span className="text-xs text-slate-400">into {a.toDepartment.name}</span>}
-                <span className={`ml-auto text-[11px] px-1.5 py-0.5 rounded-full border ${stateCls[a.state]}`}>{stateLabel[a.state]}</span>
-              </div>
-              {a.message && <div className="text-xs text-slate-500 mt-1">&ldquo;{a.message}&rdquo;</div>}
-              <div className="text-[11px] text-slate-400 mt-1">{fmtDate(a.createdAt)}</div>
-              {a.state === "PENDING_ACCEPTANCE" && a.to?.id === user?.id && (
-                <div className="flex gap-2 mt-2">
-                  <Button onClick={() => act(a.id, "accept")} disabled={busy}>Accept</Button>
-                  <button className="btn btn-sm" onClick={() => act(a.id, "decline")} disabled={busy}>Decline</button>
-                </div>
-              )}
-              {(a.state === "PENDING_ACCEPTANCE" || a.state === "PENDING_APPROVAL") && a.from?.id === user?.id && (
-                <div className="mt-2">
-                  <button className="btn btn-sm" onClick={() => act(a.id, "cancel")} disabled={busy}>Cancel</button>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      </Card>
-
-      <Card title="Documents">
-        <label className="inline-flex items-center gap-2 text-sm cursor-pointer">
-          <span className="btn btn-sm">{uploading ? "Uploading..." : "Upload file"}</span>
-          <input type="file" className="hidden" onChange={onUpload} disabled={uploading} />
-        </label>
-        <span className="text-xs text-slate-400 ml-2">Up to 20 MB per file.</span>
-        <div className="mt-3 space-y-1.5">
-          {files.length === 0 && <div className="text-sm text-slate-400">No documents attached yet.</div>}
-          {files.map((f) => (
-            <div key={f.id} className="flex items-center gap-2 border border-slate-200 rounded-md px-3 py-1.5 text-sm">
-              <button onClick={() => download(f)} className="text-indigo-700 hover:underline text-left truncate">{f.fileName}</button>
-              <span className="text-xs text-slate-400 ml-auto shrink-0">{f.uploadedBy?.fullName ?? ""} &middot; {fmtDate(f.createdAt)}</span>
-              <button onClick={() => removeFile(f.id)} className="text-xs text-red-600 hover:underline shrink-0">remove</button>
-            </div>
-          ))}
-        </div>
-      </Card>
-
-      <Card title="Remarks">
-        <div className="space-y-2 mb-3">
-          {(task.comments ?? []).length === 0 && <div className="text-sm text-slate-400">No remarks yet.</div>}
-          {(task.comments ?? []).map((c) => (
-            <div key={c.id} className="border-l-2 border-indigo-200 pl-3 py-1">
-              <div className="text-sm text-slate-700">{c.body}</div>
-              <div className="text-xs text-slate-400">
-                {c.author?.fullName ?? "Someone"}
-                {c.authorRole ? ` (${c.authorRole})` : ""} - {fmtDate(c.createdAt)}
-              </div>
-            </div>
-          ))}
-        </div>
-        <form onSubmit={addComment} className="space-y-2">
-          <textarea value={comment} onChange={(e) => setComment(e.target.value)} rows={2} placeholder="Add a remark or direction..." className={input} />
-          <div className="flex items-center gap-2">
-            <input value={authorRole} onChange={(e) => setAuthorRole(e.target.value)} placeholder="Role (optional, e.g. director)" className={`${input} max-w-xs`} />
-            <Button type="submit" disabled={busy}>Add remark</Button>
-          </div>
-        </form>
-      </Card>
-
-      <Card title="Activity timeline">
-        <div className="space-y-1.5">
-          {activity.length === 0 && <div className="text-sm text-slate-400">No activity recorded yet.</div>}
-          {activity.map((a) => (
-            <div key={a.id} className="text-sm flex items-center gap-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-slate-300 shrink-0" />
-              <span className="text-slate-700">{a.actor?.fullName ?? "Someone"}</span>
-              <span className="text-slate-500">{describeAction(a.action)}</span>
-              <span className="ml-auto text-xs text-slate-400 shrink-0">{fmtDateTime(a.createdAt)}</span>
-            </div>
-          ))}
-        </div>
-      </Card>
+          )}
+        </Card>
+      )}
     </div>
   );
 }

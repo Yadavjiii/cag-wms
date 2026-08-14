@@ -105,7 +105,7 @@ export default function ProjectPanel({ task, onChanged }: { task: Task; onChange
             {people.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.fullName}
-                {p.designation ? ` \u2014 ${p.designation}` : ""}
+                {p.designation ? ` \u2014 ${p.designation.name}` : ""}
               </option>
             ))}
           </select>
@@ -116,7 +116,7 @@ export default function ProjectPanel({ task, onChanged }: { task: Task; onChange
             {people.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.fullName}
-                {p.designation ? ` \u2014 ${p.designation}` : ""}
+                {p.designation ? ` \u2014 ${p.designation.name}` : ""}
               </option>
             ))}
           </select>

@@ -72,7 +72,7 @@ export default function Search() {
             {results.people.map((p) => (
               <div key={p.id} className="flex items-center gap-2 px-2 py-1.5 text-sm">
                 <span className="font-medium text-slate-700">{p.fullName}</span>
-                {p.designation && <span className="text-xs text-slate-400">{p.designation}</span>}
+                {p.designation && <span className="text-xs text-slate-400">{p.designation.name}</span>}
                 <span className="ml-auto text-xs text-slate-400">{p.email}</span>
               </div>
             ))}

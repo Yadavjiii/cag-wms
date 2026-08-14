@@ -32,6 +32,7 @@ export default function Staff() {
   const [designationId, setDesignationId] = useState("");
   const [mobile, setMobile] = useState("");
   const [employeeId, setEmployeeId] = useState("");
+  const [cadre, setCadre] = useState("");
   const [wing, setWing] = useState("");
   const [roleId, setRoleId] = useState("");
   const [departmentId, setDepartmentId] = useState("");
@@ -73,6 +74,7 @@ export default function Staff() {
           email,
           roleId,
           designationId: designationId || undefined,
+          cadre: cadre || undefined,
           employeeId: employeeId || undefined,
           mobile: mobile || undefined,
           wing: wing || undefined,
@@ -127,8 +129,11 @@ export default function Staff() {
     setBusy(true);
     setErr(null);
     try {
-      const { temporaryPassword } = await api<{ temporaryPassword: string }>(`/staff/${s.id}/reset-password`, { method: "POST" });
-      setIssued({ user: s, temporaryPassword });
+      const reset = await api<{ temporaryPassword: string; emailed?: boolean; emailError?: string }>(
+        `/staff/${s.id}/reset-password`,
+        { method: "POST" }
+      );
+      setIssued({ user: s, ...reset });
       await load();
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Could not reset the password");
@@ -141,10 +146,32 @@ export default function Staff() {
     setBusy(true);
     setErr(null);
     try {
-      await api(`/staff/${s.id}`, { method: "PATCH", body: JSON.stringify({ isActive }) });
+      await api(`/staff/${s.id}/active`, { method: "PATCH", body: JSON.stringify({ isActive }) });
       await load();
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Could not update the account");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
+   * Delete removes the person from this office for good: off the roster, out of
+   * search, out of every assignee and member picker, and unable to sign in.
+   * Their name still shows on the work they already did, so the audit trail
+   * stays readable. There is no undo, hence the confirm.
+   */
+  async function remove(s: StaffAccount) {
+    if (!window.confirm(`Delete ${s.fullName}'s account?\n\nThey will be removed from the office and can no longer sign in. Work they already did keeps their name on it. This cannot be undone.`)) {
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      await api(`/staff/${s.id}`, { method: "DELETE" });
+      await load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Could not delete the account");
     } finally {
       setBusy(false);
     }
@@ -194,9 +221,14 @@ export default function Staff() {
               </Field>
             </div>
             <div className="grid grid-cols-2 gap-3">
+              <Field label="Cadre">
+                <TextInput value={cadre} onChange={(e) => setCadre(e.target.value)} placeholder="IA&AS" />
+              </Field>
               <Field label="Wing">
                 <TextInput value={wing} onChange={(e) => setWing(e.target.value)} placeholder="IS Wing" />
               </Field>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
               <Field label="Mobile">
                 <TextInput value={mobile} onChange={(e) => setMobile(e.target.value)} placeholder="+91 ..." />
               </Field>
@@ -217,7 +249,7 @@ export default function Staff() {
                 {managers.map((m) => (
                   <option key={m.id} value={m.id}>
                     {m.fullName}
-                    {m.designation ? ` \u2014 ${m.designation}` : ""}
+                    {m.designation ? ` \u2014 ${m.designation.name}` : ""}
                   </option>
                 ))}
               </select>
@@ -284,14 +316,17 @@ export default function Staff() {
                       Reset password
                     </button>
                     {s.isActive ? (
-                      <button className="btn btn-sm btn-danger" onClick={() => setActive(s, false)} disabled={busy}>
-                        Deactivate
+                      <button className="btn btn-sm" onClick={() => setActive(s, false)} disabled={busy}>
+                        Suspend
                       </button>
                     ) : (
                       <button className="btn btn-sm" onClick={() => setActive(s, true)} disabled={busy}>
-                        Reactivate
+                        Restore
                       </button>
                     )}
+                    <button className="btn btn-sm btn-danger" onClick={() => remove(s)} disabled={busy}>
+                      Delete
+                    </button>
                   </div>
                 </div>
               ))}

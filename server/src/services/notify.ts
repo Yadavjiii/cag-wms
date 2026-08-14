@@ -7,11 +7,23 @@ import { emitToUser } from "../realtime";
 
 interface NotifyInput {
   userId?: string | null;
-  kind: string;         // assigned | approval_request | approved | rejected | accepted | declined | cancelled | due_soon | overdue
+  kind: string;         // assigned | approval_request | approved | rejected | accepted | declined | cancelled | due_soon | overdue | comment | status_update | blocker | meeting_invite | meeting_reminder
   title: string;
   body?: string;
   taskId?: string | null;
+  /** Set when the thing being talked about is a project rather than a work item. */
+  projectId?: string | null;
+  /** An explicit in-app path, when neither a task nor a project link is right. */
+  url?: string | null;
   sendEmail?: boolean;  // overrides the EMAIL_ON_NOTIFY default
+}
+
+/** Where a notification should take you when you click it. */
+function targetPath(input: NotifyInput): string | null {
+  if (input.url) return input.url;
+  if (input.taskId) return `/tasks/${input.taskId}`;
+  if (input.projectId) return `/projects/${input.projectId}`;
+  return null;
 }
 
 /**
@@ -22,15 +34,20 @@ interface NotifyInput {
 export async function notify(input: NotifyInput): Promise<void> {
   if (!input.userId) return;
   try {
+    const path = targetPath(input);
+    const payload = {
+      title: input.title,
+      body: input.body ?? null,
+      taskId: input.taskId ?? null,
+      projectId: input.projectId ?? null,
+      url: path,
+    };
+
     const created = await prisma.notification.create({
       data: {
         userId: input.userId,
         kind: input.kind,
-        payload: {
-          title: input.title,
-          body: input.body ?? null,
-          taskId: input.taskId ?? null,
-        } as Prisma.InputJsonValue,
+        payload: payload as Prisma.InputJsonValue,
       },
     });
 
@@ -39,19 +56,19 @@ export async function notify(input: NotifyInput): Promise<void> {
       kind: created.kind,
       isRead: false,
       createdAt: created.createdAt,
-      payload: { title: input.title, body: input.body ?? null, taskId: input.taskId ?? null },
+      payload,
     });
 
     if (input.sendEmail ?? config.emailOnNotify) {
       const user = await prisma.user.findUnique({ where: { id: input.userId }, select: { email: true, fullName: true } });
       if (user?.email) {
-        const url = input.taskId ? `${config.clientOrigin}/tasks/${input.taskId}` : config.clientOrigin;
+        const url = path ? `${config.clientOrigin}${path}` : config.clientOrigin;
         const { subject, html } = renderEmail({
           title: input.title,
           body: input.body,
           name: user.fullName,
           ctaUrl: url,
-          ctaLabel: input.taskId ? "Open work item" : undefined,
+          ctaLabel: input.taskId ? "Open work item" : input.projectId ? "Open project" : undefined,
         });
         await sendMail(user.email, subject, html);
       }

@@ -133,6 +133,17 @@ enum MeetingMode {
   ONLINE
 }
 
+/// What a post on a work item or project actually is. A thread that mixes
+/// "here is where we are" with "please do X" with "we are blocked" becomes
+/// unreadable within a week, so the kind is recorded rather than inferred.
+enum CommentKind {
+  REMARK        // ordinary comment / discussion
+  STATUS_UPDATE // progress report: carries the status and % it moved to
+  DIRECTION     // an instruction from a senior officer
+  DECISION      // a decision that was taken, for the record
+  BLOCKER       // something is stopping the work
+}
+
 // Singleton row (id = "org") holding the tenant's branding. Everything
 // organization-specific lives here as data, so the app can be rebranded for a
 // different organization without code changes.
@@ -151,6 +162,9 @@ model Office {
   name      String
   code      String?  @unique
   city      String?
+  // The office's official mailbox. This doubles as the Office Admin login, and
+  // it is the one contact detail other offices are allowed to see.
+  email     String?
   // The IAAS-rank officer (DG / PAG / DAG) who answers for this office. They
   // approve or reject work requests that arrive from other offices.
   headId    String?  @db.Char(36)
@@ -211,6 +225,9 @@ model User {
   // The official post held. Descriptive only; permissions come from `role`.
   designationId String? @db.Char(36)
   designation   Designation? @relation(fields: [designationId], references: [id])
+  // Service cadre, e.g. "IA&AS", "Group B (SOGE)", "Contract". Free text on
+  // purpose: establishment terminology varies between offices.
+  cadre        String?
   wing         String?
   roleId       String?  @db.Char(36)
   // Restrict, NOT the Prisma default of SetNull. Deleting a role that people
@@ -229,6 +246,12 @@ model User {
   // Account lifecycle. Logins are minted by a Super Admin (office admins) or by
   // an Office Admin (office staff), never by self sign-up.
   isActive           Boolean  @default(true)
+  // Deletion, as far as any user is concerned. A tombstoned account vanishes
+  // from every list, search result and picker in the app and can never sign in
+  // again, but the rows that point at it (who created this task, who wrote this
+  // remark, who approved this request) keep resolving to a real name. Erasing
+  // the row instead would punch holes in years of audit trail.
+  deletedAt          DateTime?
   mustChangePassword Boolean  @default(false)
   createdById        String?  @db.Char(36)
   createdBy          User?    @relation("UserCreator", fields: [createdById], references: [id])
@@ -251,6 +274,7 @@ model User {
   requestsTo      TaskRequest[]         @relation("ReqTo")
   requestsApproved TaskRequest[]        @relation("ReqApprover")
   comments        TaskComment[]
+  projectComments ProjectComment[]
   attachments     Attachment[]
   meetingsCreated Meeting[]             @relation("MeetingCreator")
   meetingParts    MeetingParticipant[]
@@ -276,6 +300,9 @@ model Project {
   code         String?
   description  String?       @db.Text
   status       ProjectStatus @default(ACTIVE)
+  // Projects carry an urgency of their own, so a dashboard can rank whole
+  // programmes, not only the individual items inside them.
+  priority     TaskPriority  @default(NORMAL)
   officeId     String        @db.Char(36)
   office       Office        @relation(fields: [officeId], references: [id])
   departmentId String?       @db.Char(36)
@@ -284,19 +311,28 @@ model Project {
   createdBy    User?         @relation("ProjectCreator", fields: [createdById], references: [id])
   startDate    DateTime?
   dueDate      DateTime?
+  // When somebody last posted a progress update here. Denormalised on purpose:
+  // "nothing has been reported on this for three weeks" is the single most
+  // useful alert in the system, and it must not cost a join per project.
+  lastUpdateAt DateTime?
   // Soft delete. Nothing is ever removed outright, so history survives.
   archivedAt   DateTime?
   archivedById String?       @db.Char(36)
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
-  members  ProjectMember[]
-  tasks    Task[]
-  meetings Meeting[]
+  members     ProjectMember[]
+  tasks       Task[]
+  meetings    Meeting[]
+  comments    ProjectComment[]
+  attachments Attachment[]
+  activities  ActivityLog[]
 
   @@index([officeId])
   @@index([status])
   @@index([archivedAt])
+  @@index([priority])
+  @@index([dueDate])
 }
 
 model ProjectMember {
@@ -342,6 +378,9 @@ model Task {
   assignedDate    DateTime?
   dueDate         DateTime?
   pctComplete     Int?
+  // Last time somebody reported progress (not merely edited a field). Drives
+  // the "no update in N days" alert without a join per row.
+  lastUpdateAt    DateTime?
   // Soft delete, so a removed work item stays in the audit trail.
   archivedAt      DateTime?
   archivedById    String?      @db.Char(36)
@@ -362,6 +401,8 @@ model Task {
   @@index([dueDate])
   @@index([status])
   @@index([departmentId])
+  @@index([priority])
+  @@index([lastUpdateAt])
 }
 
 // ---------- assign / request work ----------
@@ -393,32 +434,100 @@ model TaskRequest {
   @@index([state])
 }
 
-// ---------- remarks / comments ----------
+// ---------- discussion: remarks, directions and progress updates ----------
+/// One post on the thread of a work item. Anyone who can see the work item can
+/// post here; that is the point. A post is never destroyed, only tombstoned,
+/// because a discussion with holes in it is not an audit trail.
 model TaskComment {
-  id         String   @id @default(uuid()) @db.Char(36)
-  taskId     String   @db.Char(36)
-  task       Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  authorId   String?  @db.Char(36)
-  author     User?    @relation(fields: [authorId], references: [id])
+  id         String      @id @default(uuid()) @db.Char(36)
+  taskId     String      @db.Char(36)
+  task       Task        @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  authorId   String?     @db.Char(36)
+  author     User?       @relation(fields: [authorId], references: [id])
+  /// The post the author held when they wrote this, captured at write time.
+  /// Designations change; what a remark was signed as must not.
   authorRole String?
-  body       String   @db.Text
-  createdAt  DateTime @default(now())
+  kind       CommentKind @default(REMARK)
+  body       String      @db.Text
+  /// For a STATUS_UPDATE: { statusFrom, statusTo, pctFrom, pctTo }. Frozen at
+  /// write time so the thread still reads correctly after later edits.
+  meta       Json?
+  /// Replies hang off their parent, so a long thread stays followable.
+  parentId   String?     @db.Char(36)
+  parent     TaskComment?  @relation("TaskCommentThread", fields: [parentId], references: [id], onDelete: Cascade)
+  replies    TaskComment[] @relation("TaskCommentThread")
+  /// Pinned posts surface at the top: the current direction, the live blocker.
+  isPinned   Boolean     @default(false)
+  editedAt   DateTime?
+  deletedAt  DateTime?
+  createdAt  DateTime    @default(now())
+
+  attachments Attachment[]
 
   @@index([taskId])
+  @@index([parentId])
+  @@index([authorId])
+  @@index([kind])
+}
+
+/// The same thread, at project level: programme-wide discussion and reporting
+/// that does not belong to any one work item.
+model ProjectComment {
+  id         String      @id @default(uuid()) @db.Char(36)
+  projectId  String      @db.Char(36)
+  project    Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  authorId   String?     @db.Char(36)
+  author     User?       @relation(fields: [authorId], references: [id])
+  authorRole String?
+  kind       CommentKind @default(REMARK)
+  body       String      @db.Text
+  meta       Json?
+  parentId   String?     @db.Char(36)
+  parent     ProjectComment?  @relation("ProjectCommentThread", fields: [parentId], references: [id], onDelete: Cascade)
+  replies    ProjectComment[] @relation("ProjectCommentThread")
+  isPinned   Boolean     @default(false)
+  editedAt   DateTime?
+  deletedAt  DateTime?
+  createdAt  DateTime    @default(now())
+
+  attachments Attachment[]
+
+  @@index([projectId])
+  @@index([parentId])
+  @@index([authorId])
+  @@index([kind])
 }
 
 // ---------- attachments (files on server disk / cloud) ----------
+/// A file. It hangs off exactly one thing: a work item, a project, or a single
+/// post on either thread. Keeping one table rather than three means one upload
+/// path, one download path and one permission check to get right.
 model Attachment {
   id           String   @id @default(uuid()) @db.Char(36)
-  taskId       String   @db.Char(36)
-  task         Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  taskId       String?  @db.Char(36)
+  task         Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  projectId    String?  @db.Char(36)
+  project      Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  /// Set when the file was attached to a specific post rather than to the
+  /// work item as a whole.
+  taskCommentId    String?      @db.Char(36)
+  taskComment      TaskComment? @relation(fields: [taskCommentId], references: [id], onDelete: Cascade)
+  projectCommentId String?         @db.Char(36)
+  projectComment   ProjectComment? @relation(fields: [projectCommentId], references: [id], onDelete: Cascade)
   storagePath  String
   fileName     String
+  /// Size in bytes and the declared MIME type, both recorded at upload so a
+  /// file list can be rendered without touching the disk.
+  size         Int?
+  mimeType     String?
   uploadedById String?  @db.Char(36)
   uploadedBy   User?    @relation(fields: [uploadedById], references: [id])
   createdAt    DateTime @default(now())
 
   @@index([taskId])
+  @@index([projectId])
+  @@index([taskCommentId])
+  @@index([projectCommentId])
 }
 
 // ---------- meetings ----------
@@ -431,8 +540,13 @@ model Meeting {
   taskId      String?     @db.Char(36)
   task        Task?       @relation(fields: [taskId], references: [id])
   startsAt    DateTime
+  /// Optional finish time. Without it the calendar has to guess, and a two-hour
+  /// review renders as a point in time.
+  endsAt      DateTime?
   mode        MeetingMode @default(PHYSICAL)
   location    String?
+  /// Minutes of the meeting, written up afterwards.
+  minutes     String?     @db.Text
   createdById String?     @db.Char(36)
   createdBy   User?       @relation("MeetingCreator", fields: [createdById], references: [id])
   createdAt   DateTime    @default(now())
@@ -440,6 +554,7 @@ model Meeting {
   participants MeetingParticipant[]
 
   @@index([projectId])
+  @@index([taskId])
   @@index([startsAt])
 }
 
@@ -471,6 +586,10 @@ model ActivityLog {
   id        String   @id @default(uuid()) @db.Char(36)
   taskId    String?  @db.Char(36)
   task      Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  /// Project-level events (team changes, project status, project files) so a
+  /// programme has its own timeline and not just the union of its work items'.
+  projectId String?  @db.Char(36)
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
   actorId   String?  @db.Char(36)
   actor     User?    @relation(fields: [actorId], references: [id])
   action    String
@@ -478,4 +597,6 @@ model ActivityLog {
   createdAt DateTime @default(now())
 
   @@index([taskId])
+  @@index([projectId])
+  @@index([createdAt])
 }

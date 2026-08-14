@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "../prisma";
 import { asyncHandler } from "../utils/http";
 import { authenticate, isGlobalAdmin } from "../middleware/auth";
+import { VISIBLE } from "../services/accountLifecycle";
 
 export const profileRouter = Router();
 profileRouter.use(authenticate);
@@ -61,6 +62,7 @@ profileRouter.get(
     const officeScope = isGlobalAdmin(req.user!) ? {} : { officeId: req.user!.officeId ?? "__none__", isActive: true };
     const users = await prisma.user.findMany({
       where: {
+        ...VISIBLE,
         ...officeScope,
         ...(q ? { OR: [{ fullName: { contains: q } }, { email: { contains: q } }, { employeeId: { contains: q } }] } : {}),
       },

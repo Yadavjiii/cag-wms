@@ -12,12 +12,16 @@
     "prisma:migrate": "prisma migrate dev --name init",
     "prisma:studio": "prisma studio",
     "seed": "tsx prisma/seed.ts",
+    "seed:demo": "tsx prisma/demo-seed.ts",
     "check:tenancy": "tsx scripts/check-tenancy.ts",
     "doctor": "tsx scripts/doctor.ts",
     "check:schema": "prisma validate",
     "typecheck": "tsc --noEmit -p tsconfig.check.json",
     "verify": "npm run check:schema && npm run check:schema-refs && npm run typecheck && npm run check:tenancy",
-    "check:schema-refs": "tsx scripts/check-schema-refs.ts"
+    "check:schema-refs": "tsx scripts/check-schema-refs.ts",
+    "repair:roles": "tsx scripts/repair-office-admin-roles.ts",
+    "who:superadmin": "tsx scripts/who-is-super-admin.ts",
+    "test:mail": "tsx scripts/test-mail.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.19.0",

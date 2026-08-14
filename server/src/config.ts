@@ -11,7 +11,9 @@ export const config = {
   port: Number(process.env.PORT ?? 4000),
   jwtSecret: required("JWT_SECRET"),
   jwtExpiresIn: process.env.JWT_EXPIRES_IN ?? "7d",
-  allowedEmailDomain: process.env.ALLOWED_EMAIL_DOMAIN ?? "cag.gov.in",
+  // Blank means "any email domain", which is what testing needs. Set this to
+  // the real domain (e.g. cag.gov.in) before the system carries live work.
+  allowedEmailDomain: process.env.ALLOWED_EMAIL_DOMAIN ?? "",
   // Logins are minted by a Super Admin (office admins) or an Office Admin
   // (office staff). Public sign-up stays off unless explicitly enabled.
   allowSelfRegistration: (process.env.ALLOW_SELF_REGISTRATION ?? "false") === "true",

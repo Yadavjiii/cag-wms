@@ -36,7 +36,7 @@ export interface Department {
   office?: { id: string; name: string } | null;
   parent?: { id: string; name: string } | null;
   head?: { id: string; fullName: string; designation?: string | null } | null;
-  members?: { id: string; fullName: string; designation?: string | null; email: string }[];
+  members?: { id: string; fullName: string; designation?: Designation | null; email: string }[];
   children?: { id: string; name: string }[];
   _count?: { members: number; children: number };
 }
@@ -46,9 +46,11 @@ export interface Office {
   name: string;
   code?: string | null;
   city?: string | null;
+  /** The office mailbox. Doubles as the Office Admin username. */
+  email?: string | null;
   isActive?: boolean;
   /** The IAAS-rank officer who approves work arriving from other offices. */
-  head?: { id: string; fullName: string; designation?: string | null; email?: string } | null;
+  head?: { id: string; fullName: string; designation?: Designation | null; email?: string } | null;
   departments?: { id: string; name: string; code?: string | null }[];
   createdAt?: string;
   _count?: { departments: number; users: number; owningTasks?: number; projects?: number };
@@ -62,6 +64,8 @@ export interface StaffAccount {
   employeeId?: string | null;
   mobile?: string | null;
   designation?: Designation | null;
+  /** Service cadre. Free text. */
+  cadre?: string | null;
   wing?: string | null;
   isActive: boolean;
   mustChangePassword: boolean;
@@ -78,6 +82,16 @@ export interface StaffAccount {
 export interface CreatedAccount {
   user: StaffAccount;
   temporaryPassword?: string;
+  /** Did the credentials email actually go out? */
+  emailed?: boolean;
+  /** Why it did not, when it did not. */
+  emailError?: string;
+}
+
+/** POST /api/superadmin/offices returns the office AND its new admin login. */
+export interface CreatedOffice {
+  office: Office;
+  admin: StaffAccount;
 }
 
 export interface AssignableRole {
@@ -123,13 +137,46 @@ export interface Person {
   office?: { id: string; name: string } | null;
 }
 
+// ---------------------------------------------------------------------------
+// Discussion. One shape for the thread on a work item and the thread on a
+// project, so a single component can render both.
+// ---------------------------------------------------------------------------
+
+export type CommentKind = "REMARK" | "STATUS_UPDATE" | "DIRECTION" | "DECISION" | "BLOCKER";
+
+/** Frozen on a STATUS_UPDATE at the moment it was posted. */
+export interface StatusMeta {
+  statusFrom?: TaskStatus;
+  statusTo?: TaskStatus;
+  pctFrom?: number;
+  pctTo?: number;
+}
+
 export interface Comment {
   id: string;
   body: string;
+  kind: CommentKind;
   authorRole?: string | null;
   author?: Person | null;
+  meta?: StatusMeta | null;
+  parentId?: string | null;
+  isPinned?: boolean;
+  editedAt?: string | null;
+  deletedAt?: string | null;
   createdAt: string;
+  attachments?: Attachment[];
 }
+
+/** What GET /tasks/:id/discussion and /projects/:id/discussion return. */
+export interface Thread {
+  canPost: boolean;
+  canReportProgress: boolean;
+  pinned: Comment[];
+  posts: Comment[];
+}
+
+/** Where a thread lives. Drives every URL the discussion component builds. */
+export type ThreadScope = "task" | "project";
 
 export interface Task {
   projectId?: string | null;
@@ -151,11 +198,20 @@ export interface Task {
   assignedDate?: string | null;
   dueDate?: string | null;
   pctComplete: number | null;
+  /** When progress was last reported. Drives the staleness warning. */
+  lastUpdateAt?: string | null;
   createdAt: string;
   updatedAt: string;
   comments?: Comment[];
   attachments?: Attachment[];
   createdBy?: Person | null;
+  department?: { id: string; name: string } | null;
+  owningOffice?: { id: string; name: string; code?: string | null } | null;
+  executingOffice?: { id: string; name: string; code?: string | null } | null;
+  /** Set by the server so the UI never offers a control the API will refuse. */
+  canEdit?: boolean;
+  canReportProgress?: boolean;
+  _count?: { comments?: number; attachments?: number; meetings?: number; activities?: number };
 }
 
 export type RequestState =
@@ -196,8 +252,15 @@ export interface Attachment {
   id: string;
   fileName: string;
   storagePath?: string;
+  size?: number | null;
+  mimeType?: string | null;
   createdAt: string;
+  taskId?: string | null;
+  projectId?: string | null;
+  taskCommentId?: string | null;
+  projectCommentId?: string | null;
   uploadedBy?: Person | null;
+  task?: { id: string; title: string } | null;
 }
 
 export type MeetingMode = "PHYSICAL" | "ONLINE";
@@ -212,17 +275,20 @@ export interface Meeting {
   title: string;
   agenda?: string | null;
   startsAt: string;
+  endsAt?: string | null;
   mode: MeetingMode;
   location?: string | null;
+  minutes?: string | null;
   createdBy?: { id: string; fullName: string } | null;
   task?: { id: string; title: string } | null;
-
+  project?: { id: string; name: string } | null;
   participants?: MeetingParticipant[];
+  _count?: { participants: number };
 }
 
 export interface SearchResults {
   tasks: { id: string; title: string; status: TaskStatus }[];
-  people: { id: string; fullName: string; designation?: string | null; email: string }[];
+  people: { id: string; fullName: string; designation?: Designation | null; email: string }[];
   projects: { id: string; name: string }[];
   meetings: { id: string; title: string; startsAt: string }[];
 }
@@ -234,6 +300,7 @@ export interface ActivityEntry {
   detail?: Record<string, unknown> | null;
   actor?: { id: string; fullName: string } | null;
   task?: { id: string; title: string } | null;
+  project?: { id: string; name: string } | null;
 }
 
 export interface ReportSummary {
@@ -273,7 +340,9 @@ export interface Project {
   code?: string | null;
   description?: string | null;
   status: ProjectStatus;
+  priority?: TaskPriority;
   officeId: string;
+  lastUpdateAt?: string | null;
   startDate?: string | null;
   dueDate?: string | null;
   archivedAt?: string | null;
@@ -284,7 +353,8 @@ export interface Project {
   createdBy?: { id: string; fullName: string } | null;
   tasks?: Task[];
   canManage?: boolean;
-  _count?: { tasks: number };
+  canContribute?: boolean;
+  _count?: { tasks: number; members?: number; comments?: number; attachments?: number; meetings?: number; activities?: number };
 }
 
 export interface CalendarEvent {
@@ -297,4 +367,213 @@ export interface CalendarEvent {
   priority?: string | null;
   url: string;
   meta?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Dashboards. The server computes every figure in one pass and sends a single
+// snapshot, so nothing on screen can disagree with anything else on screen.
+// These interfaces mirror what /api/dashboard, /api/projects/:id/dashboard and
+// /api/tasks/:id/dashboard return.
+// ---------------------------------------------------------------------------
+
+export type Severity = "critical" | "warning" | "info";
+
+export interface Alert {
+  id: string;
+  severity: Severity;
+  kind: string;
+  title: string;
+  detail?: string;
+  count?: number;
+  url: string;
+  at?: string | null;
+}
+
+export interface Bucket {
+  key: string;
+  label: string;
+  count: number;
+}
+
+export interface WorkTotals {
+  total: number;
+  open: number;
+  finished: number;
+  overdue: number;
+  dueToday: number;
+  dueSoon: number;
+  urgent: number;
+  unassigned: number;
+  onHold: number;
+  stale: number;
+  noDueDate: number;
+  avgCompletion: number;
+  completionRate: number;
+  onTimeRate: number | null;
+}
+
+export interface WorkloadRow {
+  userId: string;
+  name: string;
+  open: number;
+  overdue: number;
+  urgent: number;
+  finished: number;
+  avgCompletion: number;
+}
+
+export interface DeptRow {
+  name: string;
+  open: number;
+  overdue: number;
+  finished: number;
+}
+
+export interface TrendPoint {
+  date: string;
+  created: number;
+  finished: number;
+  open: number;
+}
+
+export interface Health {
+  score: number;
+  label: "On track" | "Needs attention" | "At risk" | "Not started";
+  reasons: string[];
+}
+
+export interface BlockerRef {
+  id: string;
+  taskId: string | null;
+  taskTitle: string;
+  body: string;
+  createdAt: string;
+  author?: { id: string; fullName: string } | null;
+}
+
+export interface ProjectCard {
+  id: string;
+  name: string;
+  code?: string | null;
+  status: ProjectStatus;
+  priority: TaskPriority;
+  dueDate?: string | null;
+  lastUpdateAt?: string | null;
+  lead?: { id: string; fullName: string } | null;
+  department?: { id: string; name: string } | null;
+  counts: { tasks: number; members: number; posts: number; files: number };
+  totals: WorkTotals;
+  completion: number;
+  health: Health;
+}
+
+/** GET /api/dashboard */
+export interface DashboardSnapshot {
+  generatedAt: string;
+  thresholds: { staleDays: number; dueSoonDays: number };
+  totals: WorkTotals;
+  mine: {
+    totals: WorkTotals;
+    awaitingMyAcceptance: number;
+    awaitingMyApproval: number;
+    unreadNotifications: number;
+  };
+  alerts: Alert[];
+  urgent: Task[];
+  overdue: Task[];
+  dueSoon: Task[];
+  stale: Task[];
+  unassigned: Task[];
+  myWork: Task[];
+  blockers: BlockerRef[];
+  meetings: { today: Meeting[]; upcoming: Meeting[] };
+  projects: ProjectCard[];
+  statusMix: Bucket[];
+  priorityMix: Bucket[];
+  workload: WorkloadRow[];
+  byDepartment: DeptRow[];
+  trend: TrendPoint[];
+  recentActivity: ActivityEntry[];
+}
+
+/** GET /api/projects/:id/dashboard */
+export interface ProjectDashboard {
+  project: Project;
+  generatedAt: string;
+  thresholds: { staleDays: number; dueSoonDays: number };
+  health: Health;
+  totals: WorkTotals;
+  completion: number;
+  schedule: {
+    startDate?: string | null;
+    dueDate?: string | null;
+    daysToDue: number | null;
+    elapsedPct: number | null;
+  };
+  counts: { tasks: number; members: number; posts: number; files: number; meetings: number; blockers: number };
+  statusMix: Bucket[];
+  priorityMix: Bucket[];
+  byDepartment: DeptRow[];
+  trend: TrendPoint[];
+  team: {
+    userId: string;
+    role: ProjectRoleKind;
+    user: ProjectMember["user"];
+    open: number;
+    overdue: number;
+    urgent: number;
+    finished: number;
+    avgCompletion: number;
+  }[];
+  lists: {
+    urgent: Task[];
+    overdue: Task[];
+    dueSoon: Task[];
+    stale: Task[];
+    unassigned: Task[];
+    finished: Task[];
+    all: Task[];
+  };
+  blockers: BlockerRef[];
+  updates: { id: string; body: string; createdAt: string; author?: { id: string; fullName: string } | null }[];
+  files: Attachment[];
+  meetings: { upcoming: Meeting[]; past: Meeting[] };
+  activity: ActivityEntry[];
+}
+
+/** GET /api/tasks/:id/dashboard */
+export interface TaskDashboard {
+  task: Task;
+  canEdit: boolean;
+  canReportProgress: boolean;
+  health: {
+    rag: "done" | "red" | "amber" | "green" | "none";
+    overdue: boolean;
+    urgent: boolean;
+    stale: boolean;
+    daysToDue: number | null;
+    ageDays: number;
+    daysSinceUpdate: number;
+    staleAfterDays: number;
+  };
+  counts: {
+    posts: number;
+    updates: number;
+    blockers: number;
+    directions: number;
+    files: number;
+    meetings: number;
+    handovers: number;
+    activity: number;
+  };
+  timeInStatus: { status: string; days: number }[];
+  statusHistory: { at: string; status: string }[];
+  contributors: { id: string; name: string; posts: number; lastAt: string }[];
+  lastUpdate: Comment | null;
+  openBlockers: Comment[];
+  pinned: Comment[];
+  recentUpdates: Comment[];
+  files: Attachment[];
+  meetings: { past: Meeting[]; upcoming: Meeting[] };
+  activity: ActivityEntry[];
 }

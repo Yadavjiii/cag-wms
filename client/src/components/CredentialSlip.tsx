@@ -8,7 +8,7 @@ import { CreatedAccount } from "../types";
  */
 export default function CredentialSlip({ account, onDismiss }: { account: CreatedAccount; onDismiss: () => void }) {
   const [copied, setCopied] = useState(false);
-  const { user, temporaryPassword } = account;
+  const { user, temporaryPassword, emailed, emailError } = account;
 
   const text = `CAG WMS login\nName: ${user.fullName}\nEmail: ${user.email}\nTemporary password: ${temporaryPassword ?? "(set by the administrator)"}\n\nChange this password at first sign-in.`;
 
@@ -58,6 +58,19 @@ export default function CredentialSlip({ account, onDismiss }: { account: Create
       <p className="text-xs text-amber-800 mt-2">
         This password will not be shown again. If it is lost, issue a password reset instead.
       </p>
+
+      {/* Whether the email went out decides what the admin has to do next, so
+          say it plainly rather than leaving them to guess. */}
+      {emailed ? (
+        <p className="text-xs text-emerald-700 mt-2">
+          Emailed to {user.email}. They can sign in without you passing anything on.
+        </p>
+      ) : (
+        <div className="text-xs text-rose-700 mt-2 border-t border-amber-200 pt-2">
+          <strong>Not emailed.</strong> Give these credentials to the person yourself.
+          {emailError ? <div className="mt-1 text-rose-600">Reason: {emailError}</div> : null}
+        </div>
+      )}
     </section>
   );
 }

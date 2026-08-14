@@ -7,6 +7,10 @@ import { authenticate, isGlobalAdmin, headsOffice } from "../middleware/auth";
 import { notify } from "../services/notify";
 import { taskVisibilityWhere as taskVisibility, canEditTask as canEdit } from "../services/taskAccess";
 import { broadcast } from "../realtime";
+import { VISIBLE } from "../services/accountLifecycle";
+import { OFFICE_ADMIN_ROLE_FILTER } from "../services/roles";
+import { canReportProgress } from "../services/discussion";
+import { daysUntil, isOverdue, isStale, isUrgent, ragOf, STALE_DAYS } from "../services/dashboard";
 
 export const taskRouter = Router();
 taskRouter.use(authenticate);
@@ -36,6 +40,9 @@ taskRouter.get(
     const projectId = req.query.projectId as string | undefined;
     if (projectId) filters.push({ projectId });
 
+    const priority = req.query.priority as string | undefined;
+    if (priority && priority in TaskPriority) filters.push({ priority: priority as TaskPriority });
+
     if (req.query.mine === "true") {
       filters.push({
         OR: [
@@ -46,11 +53,28 @@ taskRouter.get(
       });
     }
 
-    const tasks = await prisma.task.findMany({
+    // The dashboard links straight into a filtered list, so the same words it
+    // uses on the alert strip have to mean the same thing here. They are
+    // resolved after the query rather than in SQL because "urgent" and "stale"
+    // are judgements about the row, not columns on it.
+    const open = { status: { not: TaskStatus.FINISHED } } as const;
+    const filter = req.query.filter as string | undefined;
+    if (filter === "overdue") filters.push({ ...open, dueDate: { not: null, lt: new Date() } });
+    if (filter === "due-today" || filter === "urgent" || filter === "stale") filters.push(open);
+    if (filter === "unassigned") filters.push({ ...open, primaryLeadId: null });
+
+    // platform-scope: filters[0] is always taskVisibility(req.user), which is
+    // the office boundary. The checker cannot see through the array.
+    let tasks = await prisma.task.findMany({
       where: { AND: filters },
       include: leadInclude,
       orderBy: [{ dueDate: "asc" }, { createdAt: "desc" }],
     });
+
+    if (filter === "due-today") tasks = tasks.filter((t) => daysUntil(t.dueDate) === 0);
+    if (filter === "urgent") tasks = tasks.filter(isUrgent);
+    if (filter === "stale") tasks = tasks.filter(isStale);
+
     res.json(tasks);
   })
 );
@@ -101,14 +125,34 @@ taskRouter.get(
       where: { AND: [{ id: req.params.id }, taskVisibility(req.user!)] },
       include: {
         ...leadInclude,
-        comments: { include: { author: { select: { id: true, fullName: true } } }, orderBy: { createdAt: "asc" } },
-        attachments: true,
+        comments: {
+          include: {
+            author: { select: { id: true, fullName: true, avatarUrl: true, designation: { select: { id: true, name: true, code: true } } } },
+            attachments: { select: { id: true, fileName: true, size: true, mimeType: true, createdAt: true } },
+          },
+          orderBy: { createdAt: "asc" },
+        },
+        // Files attached to the item as a whole. Files that belong to a single
+        // post travel with that post, not here, or the list becomes a dumping
+        // ground within a week.
+        attachments: {
+          where: { taskCommentId: null },
+          include: { uploadedBy: { select: { id: true, fullName: true } } },
+          orderBy: { createdAt: "desc" },
+        },
+        department: { select: { id: true, name: true } },
+        owningOffice: { select: { id: true, name: true, code: true } },
+        executingOffice: { select: { id: true, name: true, code: true } },
         createdBy: { select: { id: true, fullName: true } },
+        _count: { select: { comments: true, attachments: true, meetings: true, activities: true } },
       },
     });
     if (!task) throw new HttpError(404, "Task not found or not visible to you");
-    broadcast("task:changed", { taskId: task.id });
-    res.json(task);
+    res.json({
+      ...task,
+      canEdit: canEdit(req.user!, task),
+      canReportProgress: await canReportProgress(req.user!, task),
+    });
   })
 );
 
@@ -125,29 +169,41 @@ taskRouter.patch(
     const data = updateSchema.parse(req.body);
     if (data.status === TaskStatus.FINISHED && data.pctComplete === undefined) data.pctComplete = 100;
 
-    const task = await prisma.task.update({ where: { id: existing.id }, data, include: leadInclude });
-    await prisma.activityLog.create({
-      data: { taskId: task.id, actorId: req.user!.id, action: "updated", detail: JSON.parse(JSON.stringify(data)) as Prisma.InputJsonValue },
+    // Moving the status or the percentage IS reporting progress, even when it
+    // was done from the edit form rather than the thread. Without this the
+    // staleness alert fires on work that is visibly moving.
+    const reportedProgress = data.status !== undefined || data.pctComplete !== undefined;
+
+    const task = await prisma.task.update({
+      where: { id: existing.id },
+      data: { ...data, ...(reportedProgress ? { lastUpdateAt: new Date() } : {}) },
+      include: leadInclude,
     });
+    await prisma.activityLog.create({
+      data: {
+        taskId: task.id,
+        projectId: task.projectId,
+        actorId: req.user!.id,
+        action: reportedProgress ? "progress_reported" : "updated",
+        detail: {
+          ...(JSON.parse(JSON.stringify(data)) as Record<string, unknown>),
+          ...(data.status ? { statusFrom: existing.status, statusTo: data.status } : {}),
+          ...(data.pctComplete !== undefined ? { pctFrom: existing.pctComplete ?? 0, pctTo: data.pctComplete } : {}),
+        } as Prisma.InputJsonValue,
+      },
+    });
+    broadcast("task:changed", { taskId: task.id });
     res.json(task);
   })
 );
 
-// POST /api/tasks/:id/comments  -  add a remark (Director direction, lead note, etc.)
-const commentSchema = z.object({ body: z.string().min(1), authorRole: z.string().optional() });
-taskRouter.post(
-  "/:id/comments",
-  asyncHandler(async (req, res) => {
-    const task = await prisma.task.findFirst({ where: { AND: [{ id: req.params.id }, taskVisibility(req.user!)] } });
-    if (!task) throw new HttpError(404, "Task not found or not visible to you");
-    const { body, authorRole } = commentSchema.parse(req.body);
-    const comment = await prisma.taskComment.create({
-      data: { taskId: task.id, authorId: req.user!.id, authorRole, body },
-      include: { author: { select: { id: true, fullName: true } } },
-    });
-    res.status(201).json(comment);
-  })
-);
+// The thread on a work item (remarks, directions, progress updates, replies,
+// per-post attachments) lives in discussion.routes.ts:
+//   GET  /api/tasks/:id/discussion
+//   POST /api/tasks/:id/discussion
+//   POST /api/tasks/:id/progress
+// POST /api/tasks/:id/comments still works and is handled there too, so
+// anything written against the older endpoint keeps running.
 
 // ===================== ASSIGNMENT & APPROVAL WORKFLOW =====================
 // Assigning within your own department takes effect immediately (the assignee
@@ -301,8 +357,26 @@ taskRouter.post(
       },
     });
 
+    // Normally the head of the receiving office decides. If that office has no
+    // head appointed yet, tell its admin instead, so the request is never
+    // raised into an empty queue.
+    let decider: string | null = office.headId;
+    if (!decider) {
+      const admin = await prisma.user.findFirst({
+        where: {
+          officeId: office.id,
+          deletedAt: null,
+          isActive: true,
+          role: OFFICE_ADMIN_ROLE_FILTER,
+        },
+        orderBy: { role: { level: "desc" } },
+        select: { id: true },
+      });
+      decider = admin?.id ?? null;
+    }
+
     await notify({
-      userId: office.headId,
+      userId: decider,
       kind: "office_request",
       title: `Work request from ${user.officeName ?? "another office"}: ${task.title}`,
       body: `${user.fullName} has asked ${office.name} to take on this work. Approve or reject it, and nominate a staff member if you accept.`,
@@ -375,11 +449,15 @@ taskRouter.get(
   asyncHandler(async (req, res) => {
     const task = await prisma.task.findFirst({
       where: { AND: [{ id: req.params.id }, taskVisibility(req.user!)] },
-      select: { id: true, officeId: true },
+      // Task has no `officeId`: it carries an owning office AND an executing
+      // office. Selecting a column that does not exist threw "Unknown field"
+      // the moment anybody opened the assign picker.
+      select: { id: true, owningOfficeId: true, executingOfficeId: true },
     });
     if (!task) throw new HttpError(404, "Task not found or not visible to you");
     const people = await prisma.user.findMany({
       where: {
+        ...VISIBLE,
         isActive: true,
         ...(isGlobalAdmin(req.user!) ? {} : { officeId: task.executingOfficeId ?? req.user!.officeId ?? undefined }),
       },
@@ -413,6 +491,135 @@ taskRouter.get(
   })
 );
 
+// GET /api/tasks/:id/dashboard  -  the work-wise dashboard for one item
+//
+// Everything a review meeting asks about a single piece of work: how old it is,
+// how long it sat in each state, who has actually touched it, what is attached,
+// what is blocking it, and whether anybody has said anything lately.
+taskRouter.get(
+  "/:id/dashboard",
+  asyncHandler(async (req, res) => {
+    const task = await prisma.task.findFirst({
+      where: { AND: [{ id: req.params.id }, taskVisibility(req.user!)] },
+      include: {
+        ...leadInclude,
+        createdBy: { select: { id: true, fullName: true } },
+        department: { select: { id: true, name: true } },
+        owningOffice: { select: { id: true, name: true, code: true } },
+        executingOffice: { select: { id: true, name: true, code: true } },
+        _count: { select: { comments: true, attachments: true, meetings: true, requests: true } },
+      },
+    });
+    if (!task) throw new HttpError(404, "Task not found or not visible to you");
+
+    const [activity, posts, files, meetings] = await Promise.all([
+      prisma.activityLog.findMany({
+        where: { taskId: task.id },
+        select: { id: true, action: true, detail: true, createdAt: true, actor: { select: { id: true, fullName: true } } },
+        orderBy: { createdAt: "asc" },
+      }),
+      prisma.taskComment.findMany({
+        where: { taskId: task.id, deletedAt: null },
+        select: {
+          id: true,
+          kind: true,
+          body: true,
+          meta: true,
+          isPinned: true,
+          createdAt: true,
+          author: { select: { id: true, fullName: true } },
+        },
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.attachment.findMany({
+        where: { taskId: task.id },
+        select: { id: true, fileName: true, size: true, mimeType: true, createdAt: true, uploadedBy: { select: { id: true, fullName: true } } },
+        orderBy: { createdAt: "desc" },
+      }),
+      // platform-scope: keyed to one work item already filtered through
+      // taskVisibilityWhere at the top of this handler.
+      prisma.meeting.findMany({
+        where: { taskId: task.id },
+        select: { id: true, title: true, startsAt: true, endsAt: true, mode: true, location: true, _count: { select: { participants: true } } },
+        orderBy: { startsAt: "asc" },
+      }),
+    ]);
+
+    // How long the item has spent in each state, reconstructed from the audit
+    // trail. The trail is the only honest source for this: a status column only
+    // ever knows where the work is now.
+    const transitions = activity
+      .filter((a) => {
+        const d = a.detail as { statusTo?: string } | null;
+        return !!d?.statusTo;
+      })
+      .map((a) => ({ at: a.createdAt, status: (a.detail as { statusTo: string }).statusTo }));
+
+    const timeline = [{ at: task.createdAt, status: TaskStatus.INITIATED as string }, ...transitions];
+    const timeInStatus = new Map<string, number>();
+    for (let i = 0; i < timeline.length; i++) {
+      const until = i + 1 < timeline.length ? timeline[i + 1].at.getTime() : Date.now();
+      const days = Math.max(0, (until - timeline[i].at.getTime()) / (24 * 60 * 60 * 1000));
+      timeInStatus.set(timeline[i].status, (timeInStatus.get(timeline[i].status) ?? 0) + days);
+    }
+
+    // Who has actually contributed, as opposed to who is named on it.
+    const contributors = new Map<string, { id: string; name: string; posts: number; lastAt: Date }>();
+    for (const p of posts) {
+      if (!p.author) continue;
+      const row = contributors.get(p.author.id) ?? { id: p.author.id, name: p.author.fullName, posts: 0, lastAt: p.createdAt };
+      row.posts++;
+      if (p.createdAt > row.lastAt) row.lastAt = p.createdAt;
+      contributors.set(p.author.id, row);
+    }
+
+    const lastUpdate = posts.find((p) => p.kind === "STATUS_UPDATE") ?? null;
+    const ageDays = Math.floor((Date.now() - task.createdAt.getTime()) / (24 * 60 * 60 * 1000));
+    const sinceUpdate = Math.floor(
+      (Date.now() - (task.lastUpdateAt ?? task.updatedAt).getTime()) / (24 * 60 * 60 * 1000)
+    );
+
+    res.json({
+      task,
+      canEdit: canEdit(req.user!, task),
+      canReportProgress: await canReportProgress(req.user!, task),
+      health: {
+        rag: ragOf(task),
+        overdue: isOverdue(task),
+        urgent: isUrgent(task),
+        stale: isStale(task),
+        daysToDue: daysUntil(task.dueDate),
+        ageDays,
+        daysSinceUpdate: sinceUpdate,
+        staleAfterDays: STALE_DAYS,
+      },
+      counts: {
+        posts: posts.length,
+        updates: posts.filter((p) => p.kind === "STATUS_UPDATE").length,
+        blockers: posts.filter((p) => p.kind === "BLOCKER" && p.isPinned).length,
+        directions: posts.filter((p) => p.kind === "DIRECTION").length,
+        files: files.length,
+        meetings: meetings.length,
+        handovers: task._count.requests,
+        activity: activity.length,
+      },
+      timeInStatus: [...timeInStatus.entries()].map(([status, days]) => ({ status, days: Math.round(days * 10) / 10 })),
+      statusHistory: transitions.slice(-20),
+      contributors: [...contributors.values()].sort((a, b) => b.posts - a.posts),
+      lastUpdate,
+      openBlockers: posts.filter((p) => p.kind === "BLOCKER" && p.isPinned),
+      pinned: posts.filter((p) => p.isPinned),
+      recentUpdates: posts.filter((p) => p.kind === "STATUS_UPDATE").slice(0, 8),
+      files,
+      meetings: {
+        past: meetings.filter((m) => m.startsAt < new Date()),
+        upcoming: meetings.filter((m) => m.startsAt >= new Date()),
+      },
+      activity: [...activity].reverse().slice(0, 40),
+    });
+  })
+);
+
 // GET /api/tasks/:id/activity  -  the permanent audit timeline for a work item
 taskRouter.get(
   "/:id/activity",
@@ -435,7 +642,12 @@ taskRouter.get(
 // trail is the point of the system.
 
 /** Only the creator, a lead, an office head or an admin may delete. */
-function canDelete(user: NonNullable<import("express").Request["user"]>, task: { createdById: string | null; primaryLeadId: string | null; officeId: string | null }): boolean {
+function canDelete(
+  user: NonNullable<import("express").Request["user"]>,
+  // The signature said `officeId`, which Task does not have, while the body
+  // read `executingOfficeId`. It compiled only because the two never met.
+  task: { createdById: string | null; primaryLeadId: string | null; executingOfficeId: string | null }
+): boolean {
   if (user.permissions.includes("task.edit_any")) return true;
   if (task.executingOfficeId && user.headsOfficeIds.includes(task.executingOfficeId)) return true;
   if (user.permissions.includes("task.edit_office") && task.executingOfficeId === user.officeId) return true;

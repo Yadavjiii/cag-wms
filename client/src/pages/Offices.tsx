@@ -119,7 +119,7 @@ export default function Offices() {
                     {o.head ? (
                       <>
                         Head: {o.head.fullName}
-                        {o.head.designation ? ` \u2014 ${o.head.designation}` : ""}
+                        {o.head.designation ? ` \u2014 ${o.head.designation.name}` : ""}
                       </>
                     ) : (
                       <span className="text-amber-600">No head appointed. Requests cannot be actioned yet.</span>
@@ -181,7 +181,7 @@ export default function Offices() {
                     {members[target.id].map((m) => (
                       <div key={m.id}>
                         {m.fullName}
-                        {m.designation ? ` \u2014 ${m.designation}` : ""}
+                        {m.designation ? ` \u2014 ${m.designation.name}` : ""}
                       </div>
                     ))}
                   </div>

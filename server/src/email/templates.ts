@@ -22,7 +22,7 @@ export function renderEmail(p: EmailParts): { subject: string; html: string } {
       <div style="padding:20px">
         ${p.name ? `<p style="color:#475569;font-size:14px;margin:0 0 12px">Hello ${p.name},</p>` : ""}
         <h2 style="font-size:17px;color:#1e293b;margin:0 0 8px">${p.title}</h2>
-        ${p.body ? `<p style="color:#475569;font-size:14px;line-height:1.5;margin:0">${p.body}</p>` : ""}
+        ${p.body ? `<p style="color:#475569;font-size:14px;line-height:1.5;margin:0">${p.body.replace(/\n/g, "<br>")}</p>` : ""}
         ${cta}
         <p style="color:#94a3b8;font-size:12px;margin-top:24px">This is an automated message from ${org}.</p>
       </div>

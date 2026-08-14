@@ -30,7 +30,7 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
     }
 
     const user = await loadAuthUser(payload.sub);
-    if (!user) throw new HttpError(401, "User no longer exists");
+    if (!user || user.deletedAt) throw new HttpError(401, "User no longer exists");
     if (!user.isActive) throw new HttpError(403, "This account has been deactivated. Contact your office admin.");
 
     req.user = user;

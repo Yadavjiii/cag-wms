@@ -79,46 +79,42 @@ const ROLES: { name: string; level: number; isDefault?: boolean; description: st
   {
     name: "Super Admin",
     level: 100,
-    description: "Platform operator. Creates offices and office admins. Not a participant in daily work.",
+    description: "Platform operator. There is exactly one. Creates offices and their Office Admin login. Does no audit work.",
     perms: ALL,
   },
   {
     name: "Office Admin",
     level: 85,
-    description: "Administers one office: staff accounts, roles, departments.",
-    // Deliberately NOT office.manage: registering an office is a platform act.
-    perms: ["staff.manage", "user.manage", "role.manage", "department.manage", "task.view_office", "report.view"],
+    description:
+      "The office's own account, named after the office. Creates, edits and deletes that office's staff logins. Nothing else: it does not carry, assign or approve work.",
+    // Deliberately narrow. No task.* and no office.approve, because this
+    // account administers people, it does not participate in the work.
+    perms: ["staff.manage", "user.manage", "role.manage", "department.manage", "report.view"],
   },
   {
-    name: "Office Head",
-    level: 80,
-    description: "Answers for the office. Approves work arriving from other offices and routes work outward.",
-    perms: HEAD_PERMS,
-  },
-  {
-    name: "Project Lead",
+    name: "Head",
     level: 60,
-    description: "Runs projects and assigns work within the office.",
-    perms: ["task.view_office", "task.edit_office", "task.assign", "task.approve", "project.manage_any", "team.manage_any", "report.view"],
+    description:
+      "Answers for the office. Receives requests arriving from other offices and approves or rejects them with a reason. Otherwise works like Staff.",
+    perms: [
+      "task.view_office",
+      "task.edit_office",
+      "task.assign",
+      "task.approve",
+      "project.manage_any",
+      "team.manage_any",
+      "report.view",
+      "office.request",
+      "office.approve",
+    ],
   },
   {
-    name: "Reviewer",
-    level: 50,
-    description: "Reviews and tracks work across the office.",
-    perms: ["task.view_office", "task.assign", "report.view"],
-  },
-  {
-    name: "Employee",
+    name: "Staff",
     level: 20,
     isDefault: true,
-    description: "Standard user. Sees their own work and the projects they are on.",
-    perms: ["task.view_office"],
-  },
-  {
-    name: "Observer",
-    level: 10,
-    description: "Read-only. Sees what they are explicitly named on, and nothing else.",
-    perms: [],
+    description:
+      "Everyone who does the work. Creates tasks and projects, adds members, sets project leads, and is assigned work by others.",
+    perms: ["task.view_office", "task.edit_office", "task.assign", "office.request"],
   },
 ];
 
@@ -130,19 +126,26 @@ const LEGACY_ROLE_MAP: Record<string, { role: string; designation?: string }> = 
   "Super Admin": { role: "Super Admin", designation: "System Administrator" },
   "Administrator": { role: "Office Admin", designation: "Administrative Officer" },
   "Office Admin": { role: "Office Admin", designation: "Administrative Officer" },
-  "Director General": { role: "Office Head", designation: "Director General" },
-  "Principal Accountant General": { role: "Office Head", designation: "Principal Accountant General" },
-  "Accountant General": { role: "Office Head", designation: "Accountant General" },
-  "Deputy Accountant General": { role: "Office Head", designation: "Deputy Accountant General" },
-  "Department Head": { role: "Office Head" },
-  "Senior Audit Officer": { role: "Project Lead", designation: "Senior Audit Officer" },
-  "Team Lead": { role: "Project Lead" },
-  "Assistant Audit Officer": { role: "Reviewer", designation: "Assistant Audit Officer" },
-  "Supervisor": { role: "Employee", designation: "Supervisor" },
-  "Senior Auditor": { role: "Employee", designation: "Senior Auditor" },
-  "Auditor": { role: "Employee", designation: "Auditor" },
-  "Consultant": { role: "Observer", designation: "Consultant" },
-  "Member": { role: "Employee" },
+  // Everything that used to be a seniority tier now collapses onto Head or
+  // Staff. Seniority is expressed by designation and by project role instead.
+  "Office Head": { role: "Head" },
+  "Director General": { role: "Head", designation: "Director General" },
+  "Principal Accountant General": { role: "Head", designation: "Principal Accountant General" },
+  "Accountant General": { role: "Head", designation: "Accountant General" },
+  "Deputy Accountant General": { role: "Head", designation: "Deputy Accountant General" },
+  "Department Head": { role: "Head" },
+  "Project Lead": { role: "Staff" },
+  "Senior Audit Officer": { role: "Staff", designation: "Senior Audit Officer" },
+  "Team Lead": { role: "Staff" },
+  "Reviewer": { role: "Staff" },
+  "Assistant Audit Officer": { role: "Staff", designation: "Assistant Audit Officer" },
+  "Supervisor": { role: "Staff", designation: "Supervisor" },
+  "Senior Auditor": { role: "Staff", designation: "Senior Auditor" },
+  "Auditor": { role: "Staff", designation: "Auditor" },
+  "Consultant": { role: "Staff", designation: "Consultant" },
+  "Observer": { role: "Staff" },
+  "Employee": { role: "Staff" },
+  "Member": { role: "Staff" },
 };
 
 async function main() {

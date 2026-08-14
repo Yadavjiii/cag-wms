@@ -72,3 +72,20 @@ export async function downloadFile(path: string, fileName: string): Promise<void
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+/**
+ * A blob URL for an inline preview.
+ *
+ * The preview route is behind the bearer token, so a plain <img src> or a new
+ * tab pointed at the API would come back 401. Fetching it here and handing back
+ * an object URL is the only way to show a protected file in the browser without
+ * putting the token in a query string, where it would end up in logs.
+ */
+export async function viewUrl(attachmentId: string): Promise<string> {
+  const token = getToken();
+  const res = await fetch(`${API_URL}/attachments/${attachmentId}/view`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new Error("Could not open that file");
+  return URL.createObjectURL(await res.blob());
+}

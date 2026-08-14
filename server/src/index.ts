@@ -19,6 +19,8 @@ import { attachmentRouter } from "./routes/attachment.routes";
 import { meetingRouter } from "./routes/meeting.routes";
 import { searchRouter } from "./routes/search.routes";
 import { reportRouter } from "./routes/report.routes";
+import { dashboardRouter } from "./routes/dashboard.routes";
+import { discussionRouter } from "./routes/discussion.routes";
 import { settingsRouter } from "./routes/settings.routes";
 import { startReminders } from "./jobs/reminders";
 import { errorHandler } from "./middleware/error";
@@ -44,11 +46,17 @@ app.use("/api/offices", officeRouter);
 app.use("/api/departments", departmentRouter);
 app.use("/api/assignments", assignmentRouter);
 app.use("/api/notifications", notificationRouter);
-app.use("/api", attachmentRouter);
 app.use("/api/meetings", meetingRouter);
 app.use("/api/search", searchRouter);
 app.use("/api/reports", reportRouter);
+app.use("/api/dashboard", dashboardRouter);
 app.use("/api/settings", settingsRouter);
+// Both of these declare paths under other routers' prefixes (/api/tasks/...,
+// /api/projects/...), so they are mounted at /api and must come last: Express
+// tries the specific routers first and falls through to these.
+app.use("/api", discussionRouter);
+app.use("/api", attachmentRouter);
+
 
 // Error handler must be registered last.
 app.use(errorHandler);

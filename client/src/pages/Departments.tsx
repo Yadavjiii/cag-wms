@@ -33,6 +33,22 @@ export default function Departments() {
     load();
   }, []);
 
+  /**
+   * Delete an empty department. The server refuses while anything still points
+   * at it and says what, so the error is worth showing verbatim.
+   */
+  async function removeDept(d: Department) {
+    if (!window.confirm(`Delete the department "${d.name}"?`)) return;
+    setErr(null);
+    try {
+      await api(`/departments/${d.id}`, { method: "DELETE" });
+      if (selected?.id === d.id) setSelected(null);
+      await load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Could not delete the department");
+    }
+  }
+
   async function openDetail(id: string) {
     try {
       setSelected(await api<Department>(`/departments/${id}`));
@@ -105,20 +121,28 @@ export default function Departments() {
         <Card title={`Departments (${depts.length})`} className="md:col-span-2">
           <div className="space-y-2">
             {depts.map((d) => (
-              <button
+              <div
                 key={d.id}
-                onClick={() => openDetail(d.id)}
-                className={`w-full text-left border rounded-md px-3 py-2 hover:bg-slate-50 ${
+                className={`border rounded-md px-3 py-2 ${
                   selected?.id === d.id ? "border-indigo-300 bg-indigo-50" : "border-slate-200"
                 }`}
               >
                 <div className="flex items-center gap-2">
-                  <span className="font-medium text-slate-700">{d.name}</span>
+                  <button onClick={() => openDetail(d.id)} className="text-left font-medium text-slate-700 hover:underline">
+                    {d.name}
+                  </button>
                   {d.code && <span className="text-xs text-slate-400">{d.code}</span>}
                   <span className="ml-auto text-xs text-slate-400">{d._count?.members ?? 0} members</span>
+                  <button
+                    onClick={() => removeDept(d)}
+                    className="text-xs text-rose-600 hover:underline"
+                    title="Delete this department"
+                  >
+                    Delete
+                  </button>
                 </div>
                 <div className="text-xs text-slate-500 mt-0.5">Head: {d.head?.fullName ?? "unassigned"}</div>
-              </button>
+              </div>
             ))}
             {depts.length === 0 && <div className="text-sm text-slate-400 py-4 text-center">No departments yet.</div>}
           </div>
@@ -134,7 +158,7 @@ export default function Departments() {
                 <option value="">Unassigned</option>
                 {people.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.fullName} {p.designation ? `(${p.designation})` : ""}
+                    {p.fullName} {p.designation ? `(${p.designation.name})` : ""}
                   </option>
                 ))}
               </select>
@@ -148,7 +172,7 @@ export default function Departments() {
                 <option value="">Select a person to add...</option>
                 {people.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.fullName} {p.designation ? `(${p.designation})` : ""}
+                    {p.fullName} {p.designation ? `(${p.designation.name})` : ""}
                   </option>
                 ))}
               </select>
@@ -160,7 +184,7 @@ export default function Departments() {
                 {selected.members?.map((m) => (
                   <div key={m.id} className="flex items-center gap-2 border border-slate-200 rounded-md px-3 py-1.5 text-sm">
                     <span className="font-medium text-slate-700">{m.fullName}</span>
-                    <span className="text-xs text-slate-400">{m.designation}</span>
+                    <span className="text-xs text-slate-400">{m.designation?.name}</span>
                     <button className="ml-auto text-xs text-red-600 hover:underline" onClick={() => removeMember(selected.id, m.id)}>
                       remove
                     </button>

@@ -85,6 +85,9 @@ authRouter.post(
     const { email, password } = loginSchema.parse(req.body);
     const user = await prisma.user.findUnique({ where: { email } });
     if (!user) throw new HttpError(401, "Invalid email or password");
+    // A deleted account keeps its row so history renders, but it is not a
+    // login any more. Same generic message, so nobody can probe for it.
+    if (user.deletedAt || !user.passwordHash) throw new HttpError(401, "Invalid email or password");
 
     const ok = await bcrypt.compare(password, user.passwordHash);
     if (!ok) throw new HttpError(401, "Invalid email or password");

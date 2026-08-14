@@ -5,7 +5,7 @@ import { prisma } from "../prisma";
 import { config } from "../config";
 import { HttpError } from "../utils/http";
 import { isGlobalAdmin } from "../middleware/auth";
-import { sendMail } from "../email/mailer";
+import { sendMail, type MailResult } from "../email/mailer";
 import { renderEmail } from "../email/templates";
 import type { AuthUser } from "../types/express";
 
@@ -27,6 +27,7 @@ export const accountSelect = {
   fullName: true,
   email: true,
   designation: { select: { id: true, name: true, code: true, rank: true } },
+  cadre: true,
   wing: true,
   mobile: true,
   isActive: true,
@@ -52,8 +53,13 @@ export const createAccountSchema = z.object({
   employeeId: z.string().optional(),
   mobile: z.string().optional(),
   designationId: z.string().nullable().optional(),
+  /** Service cadre, free text. */
+  cadre: z.string().optional(),
   wing: z.string().optional(),
-  /** Force a password change on first login. Defaults to true. */
+  /**
+   * Force a password change on first login. Defaults to FALSE: the admin picks
+   * the password and hands it over, and the user changes it later if they want.
+   */
   mustChangePassword: z.boolean().optional(),
 });
 
@@ -65,9 +71,14 @@ export function generateTempPassword(): string {
 }
 
 function assertDomain(email: string): void {
+  // An empty ALLOWED_EMAIL_DOMAIN means "any address". That is the setting for
+  // testing, where accounts get made on gmail and similar. Put the real domain
+  // back in .env before this carries live audit work.
+  const allowed = config.allowedEmailDomain.trim();
+  if (!allowed) return;
   const domain = email.split("@")[1]?.toLowerCase();
-  if (domain !== config.allowedEmailDomain.toLowerCase()) {
-    throw new HttpError(400, `Accounts must use an @${config.allowedEmailDomain} address`);
+  if (domain !== allowed.toLowerCase()) {
+    throw new HttpError(400, `Accounts must use an @${allowed} address`);
   }
 }
 
@@ -77,8 +88,23 @@ function assertDomain(email: string): void {
  * and never another account at their own level that could then unmake them.
  */
 async function assertGrantableRole(actor: AuthUser, roleId: string) {
-  const role = await prisma.role.findUnique({ where: { id: roleId }, select: { id: true, name: true, level: true } });
+  const role = await prisma.role.findUnique({
+    where: { id: roleId },
+    select: { id: true, name: true, level: true, permissions: { select: { permission: { select: { key: true } } } } },
+  });
   if (!role) throw new HttpError(404, "Role not found");
+
+  // A platform role lifts the office boundary, so it is never something an
+  // office account can be created with. This holds even for a Super Admin
+  // acting inside an office: creating a second platform operator is a separate,
+  // deliberate act, not a side effect of adding staff.
+  if (role.permissions.some((p) => p.permission.key === "office.manage_all")) {
+    throw new HttpError(
+      403,
+      `"${role.name}" can see and act across every office, so it cannot be assigned to an office account.`
+    );
+  }
+
   if (!isGlobalAdmin(actor) && role.level >= actor.level) {
     throw new HttpError(403, `You cannot create an account with the "${role.name}" role, which is at or above your own level`);
   }
@@ -107,8 +133,18 @@ export interface CreatedAccount {
 export async function createAccount(actor: AuthUser, input: CreateAccountInput) {
   assertDomain(input.email);
 
-  const existing = await prisma.user.findUnique({ where: { email: input.email }, select: { id: true } });
-  if (existing) throw new HttpError(409, "An account with this email already exists");
+  const existing = await prisma.user.findUnique({
+    where: { email: input.email },
+    select: { id: true, deletedAt: true },
+  });
+  if (existing) {
+    throw new HttpError(
+      409,
+      existing.deletedAt
+        ? "That email belonged to a deleted account. Restore it instead, or use a different address."
+        : "An account with this email already exists"
+    );
+  }
 
   const officeId = resolveOfficeId(actor, input.officeId);
   const office = await prisma.office.findUnique({ where: { id: officeId }, select: { id: true, isActive: true } });
@@ -146,8 +182,9 @@ export async function createAccount(actor: AuthUser, input: CreateAccountInput) 
       employeeId: input.employeeId,
       mobile: input.mobile,
       designationId: input.designationId ?? undefined,
+      cadre: input.cadre,
       wing: input.wing,
-      mustChangePassword: input.mustChangePassword ?? true,
+      mustChangePassword: input.mustChangePassword ?? false,
       createdById: actor.id,
     },
     select: accountSelect,
@@ -155,13 +192,19 @@ export async function createAccount(actor: AuthUser, input: CreateAccountInput) 
 
   // Email the credentials as well as returning them, so the admin does not have
   // to relay them by hand. Best-effort: a mail failure must not undo the account.
-  await emailCredentials(user.email, user.fullName, actor.fullName, temporaryPassword ?? null);
+  const mail = await emailCredentials(user.email, user.fullName, actor.fullName, temporaryPassword ?? null);
 
-  return { user, temporaryPassword };
+  // The admin needs to know whether to pass the password on by hand.
+  return { user, temporaryPassword, emailed: mail.sent, emailError: mail.reason };
 }
 
-/** Sends the welcome mail with sign-in details. Never throws. */
-async function emailCredentials(email: string, fullName: string, createdBy: string, temporaryPassword: string | null) {
+/** Sends the welcome mail with sign-in details. Never throws; reports outcome. */
+async function emailCredentials(
+  email: string,
+  fullName: string,
+  createdBy: string,
+  temporaryPassword: string | null
+): Promise<MailResult> {
   try {
     const { subject, html } = renderEmail({
       title: "Your CAG WMS account is ready",
@@ -177,9 +220,11 @@ You will be asked to choose your own password the first time you sign in.`
       ctaUrl: config.clientOrigin,
       ctaLabel: "Sign in",
     });
-    await sendMail(email, subject, html);
+    return await sendMail(email, subject, html);
   } catch (e) {
-    console.error("[provisioning] credential email failed:", (e as Error).message);
+    const reason = (e as Error).message;
+    console.error("[provisioning] credential email failed:", reason);
+    return { sent: false, reason };
   }
 }
 
@@ -201,6 +246,6 @@ export async function resetPassword(actor: AuthUser, targetId: string) {
     data: { passwordHash: await bcrypt.hash(temporaryPassword, 12), mustChangePassword: true },
     select: { email: true, fullName: true },
   });
-  await emailCredentials(updated.email, updated.fullName, actor.fullName, temporaryPassword);
-  return { temporaryPassword };
+  const mail = await emailCredentials(updated.email, updated.fullName, actor.fullName, temporaryPassword);
+  return { temporaryPassword, emailed: mail.sent, emailError: mail.reason };
 }
